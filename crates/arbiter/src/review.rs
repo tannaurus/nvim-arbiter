@@ -937,8 +937,7 @@ fn nav_prev_hunk(review: &mut Review) {
     let prev = review
         .current_hunks
         .iter()
-        .filter(|h| h.buf_start < line_0)
-        .next_back()
+        .rfind(|h| h.buf_start < line_0)
         .map(|h| h.buf_start)
         .or_else(|| review.current_hunks.last().map(|h| h.buf_start));
     if let Some(target) = prev {

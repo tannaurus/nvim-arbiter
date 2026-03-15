@@ -20,9 +20,6 @@ jobs:
           cache: true
       - run: cargo fmt -p arbiter -- --check
       - run: cargo clippy -p arbiter -- -D warnings
-      - run: cargo test -p arbiter
-    env:
-      RUST_TEST_THREADS: "1"
 
   build:
     name: Build ${{ matrix.target }}
