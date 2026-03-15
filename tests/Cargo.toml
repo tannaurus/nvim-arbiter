@@ -1,0 +1,16 @@
+[package]
+name = "arbiter-tests"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[build-dependencies]
+nvim-oxi = { version = "0.6", features = ["neovim-0-10", "test"] }
+
+[dependencies]
+arbiter = { path = "../crates/arbiter" }
+uuid = { version = "1", features = ["v4"] }
+nvim-oxi = { version = "0.6", features = ["neovim-0-10", "libuv", "test"] }
+tempfile = "3"

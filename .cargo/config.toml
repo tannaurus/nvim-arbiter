@@ -1,0 +1,8 @@
+# macOS: cdylib plugins are loaded by Neovim at runtime.
+# FFI symbols (lua_*, nvim_*, luv_*) are provided by the Neovim process.
+# Allow undefined symbols at link time; they resolve when the .so is loaded.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

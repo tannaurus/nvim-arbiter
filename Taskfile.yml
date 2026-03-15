@@ -1,0 +1,61 @@
+version: '3'
+
+vars:
+  PLUGIN_LIB:
+    sh: |
+      case "$(uname -s)" in
+        Darwin) echo "libarbiter.dylib" ;;
+        *)      echo "libarbiter.so" ;;
+      esac
+  PLUGIN_EXT: .so
+
+tasks:
+  build:
+    desc: Build the plugin in release mode
+    cmds:
+      - cargo build --release
+      - echo "Built target/release/{{.PLUGIN_LIB}}"
+
+  install:
+    desc: Build and install the plugin into Neovim's runtime path
+    deps: [build]
+    cmds:
+      - |
+        install_dir=""
+        for p in ~/.local/share/nvim ~/.config/nvim; do
+          if [ -d "$p" ]; then
+            install_dir="$p/lua"
+            break
+          fi
+        done
+        if [ -z "$install_dir" ]; then
+          install_dir="$HOME/.local/share/nvim/lua"
+        fi
+        mkdir -p "$install_dir"
+        cp target/release/{{.PLUGIN_LIB}} "$install_dir/arbiter{{.PLUGIN_EXT}}" 2>/dev/null || \
+          ln -sf "$PWD/target/release/{{.PLUGIN_LIB}}" "$install_dir/arbiter{{.PLUGIN_EXT}}"
+        echo "Installed to $install_dir/arbiter{{.PLUGIN_EXT}}"
+
+  test:
+    desc: Run all tests (single-threaded)
+    cmds:
+      - cargo test
+    env:
+      RUST_TEST_THREADS: "1"
+
+  lint:
+    desc: Run clippy with warnings as errors
+    cmds:
+      - cargo clippy -- -D warnings
+
+  fmt:
+    desc: Format all Rust code
+    cmds:
+      - cargo fmt
+
+  check:
+    desc: Format, lint, and test
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test

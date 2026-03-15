@@ -1,0 +1,27 @@
+# Rust build output
+/target
+
+# Cargo lock is committed for applications but this is a plugin/library
+# Uncomment if you prefer not to commit Cargo.lock:
+# Cargo.lock
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Compiled Lua module (if copied outside target/)
+lua/arbiter.so
+lua/arbiter.dylib
+
+# Plugin state directory (local review data)
+.arbiter/
+
+# Environment
+.env
+.env.*

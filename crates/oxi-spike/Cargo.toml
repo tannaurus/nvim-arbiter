@@ -1,0 +1,11 @@
+[package]
+name = "oxi-spike"
+version = "0.1.0"
+edition = "2021"
+description = "E0-0 nvim-oxi API spike (throwaway)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nvim-oxi = { version = "0.6", features = ["neovim-0-10", "libuv"] }
