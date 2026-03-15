@@ -1,5 +1,13 @@
 # arbiter
 
+[![CI](https://github.com/tannaurus/nvim-arbiter/actions/workflows/ci.yml/badge.svg)](https://github.com/tannaurus/nvim-arbiter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tannaurus/nvim-arbiter?style=flat&label=release)](https://github.com/tannaurus/nvim-arbiter/releases/latest)
+[![Neovim](https://img.shields.io/badge/neovim-0.10%2B-57A143?logo=neovim&logoColor=white)](https://neovim.io)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)]()
+
+> **Experimental** - This plugin is under active development. APIs, commands, and keymaps may change without notice.
+
 Agentic review workbench for Neovim. Provides a structured diff viewer and thread-based review system for collaborating with AI coding agents (Cursor CLI, Claude Code CLI).
 
 Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a native shared library.
@@ -20,6 +28,51 @@ Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a 
 - **Per-workspace config** - Override the default comparison branch per repository
 - **Backend shim** - Transparent support for both Cursor CLI and Claude Code CLI
 
+## Workflow
+
+Arbiter is designed for a specific loop: an AI agent writes code, you review it, you give feedback, the agent revises, and you review again. This is fundamentally different from reviewing human-written code - you didn't write any of it, so you need to understand intent, verify correctness, and steer the agent, all without leaving Neovim.
+
+### The review loop
+
+1. **The agent works.** You give Cursor or Claude Code a task. It writes code across multiple files.
+
+2. **You open the workbench.** `:Arbiter main` opens a dedicated review tabpage. The left panel shows changed files (like a PR file list). The right panel shows the diff. Only changes introduced by your branch appear - arbiter uses `git merge-base` so the diff matches what a GitHub/GitLab PR would show.
+
+3. **You review file by file.** Select files in the left panel with `<CR>`. Jump between hunks with `]c`/`[c`. Collapse directories you don't care about. Use `<Leader>s` for a side-by-side view when you need it.
+
+4. **You give feedback.** Press `<Leader>ac` on any line to leave a comment. A thread opens immediately and your comment is sent to the agent. The agent's response streams in real-time. This is the core interaction - every piece of feedback is a thread anchored to a specific line, just like a PR review comment.
+
+5. **The agent revises.** The agent reads your feedback and makes changes. Arbiter polls the filesystem and updates the diff automatically - you see changes appear without refreshing.
+
+6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Press `<Leader>as` for a summary of where you stand.
+
+7. **Repeat.** Continue reviewing, commenting, and approving until the changeset looks right. Close the workbench with `q` when you're done. Your review state (approvals, threads, conversations) is persisted to disk and restored if you reopen.
+
+### Quick feedback with auto-resolve
+
+For simple requests like "rename this variable" or "add a docstring here", use `<Leader>aA` instead of `<Leader>ac`. This creates a thread that auto-resolves once the agent applies the change - you don't have to manually close it.
+
+### Agent self-review
+
+Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus.
+
+### Catching up
+
+If you step away and come back, `:ArbiterCatchUp` asks the agent to summarize what it's done. `:ArbiterList` shows saved sessions you can resume.
+
+### Side-by-side diff
+
+Press `<Leader>s` on any file to open a side-by-side diff in a new tabpage using Neovim's native `:diffthis`. The left buffer shows the file at the merge-base, the right shows the working copy. Both get syntax highlighting. Press `<Leader>s` again (or `:tabclose`) to return.
+
+### Changing the comparison branch
+
+The default comparison branch is set in your config (globally or per-workspace). You can also change it on the fly:
+
+- `:ArbiterRef develop` - switch to comparing against `develop`
+- `:ArbiterRef` - clear the base (diff against working tree)
+
+See [Per-workspace ref override](#per-workspace-ref-override) for configuring defaults per repository.
+
 ## Requirements
 
 | Dependency | Version | Notes |
@@ -27,17 +80,9 @@ Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a 
 | Neovim | 0.10+ | Uses `vim.uv`, `vim.fs`, and nvim-oxi 0.11 API features |
 | Rust toolchain | stable | `cargo` and `rustc` must be on `$PATH` to compile the native library |
 | Git | any recent | The plugin shells out to `git` for diffs, merge-base, file lists, etc. |
-| Backend CLI | one of: | At least one agent CLI must be installed |
-| - Cursor CLI | | `cursor` binary (installed via Cursor editor) |
-| - Claude Code CLI | | `claude` binary (installed via `npm install -g @anthropic-ai/claude-code`) |
+| Cursor CLI **or** Claude Code CLI | | At least one: `cursor` (via Cursor editor) or `claude` (via `npm install -g @anthropic-ai/claude-code`) |
 
 **Platform support:** macOS and Linux. No Windows support.
-
-**Neovim configuration:** Most keymaps use `<Leader>a` as a prefix. If you haven't set `mapleader`, they will bind to `\a` by default. Set your leader before loading the plugin:
-
-```lua
-vim.g.mapleader = " "  -- space as leader, for example
-```
 
 **State directory:** Review state, threads, and sessions are persisted to `~/.local/share/nvim/arbiter/` by default. Override with `review.state_dir` in config.
 
@@ -188,7 +233,6 @@ require("arbiter").setup({
   },
 
   -- Extra CLI flags appended to every backend invocation.
-  -- Useful for flags like --yolo (Cursor) or --dangerously-skip-permissions (Claude).
   extra_args = {},
 
   -- Per-workspace overrides, keyed by absolute directory path.
@@ -259,14 +303,8 @@ When a repository uses a branch other than `main` as its primary branch, configu
 
 ```lua
 workspaces = {
-  -- Absolute path: exact prefix match
-  ["/Users/me/work/my-project"] = {
+  ["~/work/my-project"] = {
     default_ref = "trunk",
-  },
-
-  -- Tilde expansion works
-  ["~/work/other-project"] = {
-    default_ref = "develop",
   },
 
   -- Regex: match all repos under a specific org directory
@@ -291,6 +329,25 @@ workspaces = {
 5. No base (diffs against working tree)
 
 You can also change the ref on the fly during an active review with `:ArbiterRef`.
+
+### Backend permissions
+
+When arbiter sends feedback to the agent, the agent may need to run shell commands (e.g. `git`, `cargo fmt`) to apply changes. By default, both Cursor and Claude Code require interactive approval for shell commands. Since arbiter runs the CLI non-interactively, the agent will simply report that it cannot execute the command rather than prompting you.
+
+**Recommended:** Configure your backend's built-in allowlists rather than disabling permissions entirely.
+
+**Cursor CLI** - Create or edit `~/.cursor/cli.json`:
+
+```json
+{
+  "enabledTools": ["shell"],
+  "allowedCommands": ["git", "cargo fmt", "rustfmt"]
+}
+```
+
+**Claude Code** - See the [Claude Code docs](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) for configuring allowed tools.
+
+Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_args` is discouraged. These flags allow the agent to run arbitrary commands without approval, including destructive operations like `rm -rf` or `git push --force`.
 
 ## Commands
 
@@ -398,51 +455,6 @@ When a thread conversation is open:
 | `<CR>` | Reply to the thread (opens input float). |
 | `q` | Close the thread window. |
 
-## Workflow
-
-Arbiter is designed for a specific loop: an AI agent writes code, you review it, you give feedback, the agent revises, and you review again. This is fundamentally different from reviewing human-written code - you didn't write any of it, so you need to understand intent, verify correctness, and steer the agent, all without leaving Neovim.
-
-### The review loop
-
-1. **The agent works.** You give Cursor or Claude Code a task. It writes code across multiple files.
-
-2. **You open the workbench.** `:Arbiter main` opens a dedicated review tabpage. The left panel shows changed files (like a PR file list). The right panel shows the diff. Only changes introduced by your branch appear - arbiter uses `git merge-base` so the diff matches what a GitHub/GitLab PR would show.
-
-3. **You review file by file.** Select files in the left panel with `<CR>`. Jump between hunks with `]c`/`[c`. Collapse directories you don't care about. Use `<Leader>s` for a side-by-side view when you need it.
-
-4. **You give feedback.** Press `<Leader>ac` on any line to leave a comment. A thread opens immediately and your comment is sent to the agent. The agent's response streams in real-time. This is the core interaction - every piece of feedback is a thread anchored to a specific line, just like a PR review comment.
-
-5. **The agent revises.** The agent reads your feedback and makes changes. Arbiter polls the filesystem and updates the diff automatically - you see changes appear without refreshing.
-
-6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Press `<Leader>as` for a summary of where you stand.
-
-7. **Repeat.** Continue reviewing, commenting, and approving until the changeset looks right. Close the workbench with `q` when you're done. Your review state (approvals, threads, conversations) is persisted to disk and restored if you reopen.
-
-### Quick feedback with auto-resolve
-
-For simple requests like "rename this variable" or "add a docstring here", use `<Leader>aA` instead of `<Leader>ac`. This creates a thread that auto-resolves once the agent applies the change - you don't have to manually close it.
-
-### Agent self-review
-
-Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus.
-
-### Catching up
-
-If you step away and come back, `:ArbiterCatchUp` asks the agent to summarize what it's done. `:ArbiterList` shows saved sessions you can resume.
-
-### Side-by-side diff
-
-Press `<Leader>s` on any file to open a side-by-side diff in a new tabpage using Neovim's native `:diffthis`. The left buffer shows the file at the merge-base, the right shows the working copy. Both get syntax highlighting. Press `<Leader>s` again (or `:tabclose`) to return.
-
-### Changing the comparison branch
-
-The default comparison branch is set in your config (globally or per-workspace). You can also change it on the fly:
-
-- `:ArbiterRef develop` - switch to comparing against `develop`
-- `:ArbiterRef` - clear the base (diff against working tree)
-
-See [Per-workspace ref override](#per-workspace-ref-override) for configuring defaults per repository.
-
 ## Build from source
 
 ```bash
@@ -491,7 +503,3 @@ The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C 
 - `poll.rs` - Periodic file and file-list refresh via libuv timers
 - `activity.rs` - Backend busy/idle tracking for statusline display
 - `highlight.rs` - Custom highlight groups and sign definitions
-
-## License
-
-MIT
