@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: CI gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          cache: true
+      - run: cargo fmt -p arbiter -- --check
+      - run: cargo clippy -p arbiter -- -D warnings
+      - run: cargo test -p arbiter
+    env:
+      RUST_TEST_THREADS: "1"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [check]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: target/x86_64-unknown-linux-gnu/release/libarbiter.so
+            ext: so
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: target/aarch64-unknown-linux-gnu/release/libarbiter.so
+            ext: so
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: target/x86_64-unknown-linux-musl/release/libarbiter.so
+            ext: so
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact_name: target/aarch64-unknown-linux-musl/release/libarbiter.so
+            ext: so
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: target/x86_64-apple-darwin/release/libarbiter.dylib
+            ext: dylib
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: target/aarch64-apple-darwin/release/libarbiter.dylib
+            ext: dylib
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-on-failure: true
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: contains(matrix.os, 'ubuntu') && contains(matrix.target, 'aarch64')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p arbiter
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Rename artifact
+        run: mv "${{ matrix.artifact_name }}" "${{ matrix.target }}.${{ matrix.ext }}"
+
+      - name: Ad-hoc sign macOS binary
+        if: contains(matrix.os, 'macos')
+        run: codesign --force --sign - "${{ matrix.target }}.${{ matrix.ext }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ matrix.target }}.*
+
+  release:
+    name: Release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./binaries
+
+      - name: Flatten artifacts
+        working-directory: ./binaries
+        run: |
+          for dir in */; do
+            for file in "$dir"*; do
+              if [ -f "$file" ]; then
+                mv "$file" "./$(basename "$file")"
+              fi
+            done
+            rmdir "$dir" 2>/dev/null || true
+          done
+
+      - name: Generate checksums
+        working-directory: ./binaries
+        run: |
+          for file in *; do
+            if [ -f "$file" ] && [[ ! "$file" == *.sha256 ]]; then
+              sha256sum "$file" > "${file}.sha256"
+            fi
+          done
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }}"
+          tag_name: "${{ github.ref_name }}"
+          token: ${{ github.token }}
+          files: ./binaries/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

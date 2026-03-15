@@ -1,50 +1,56 @@
--- Loader for arbiter native module.
--- Loads the dylib directly from the cargo build output to avoid
--- code signature invalidation from file copies on macOS.
-local source = debug.getinfo(1, "S").source:sub(2)
-local dir = vim.fs.dirname(source)
-local plugin_root = vim.fs.dirname(vim.fs.dirname(dir))
+local build = require("arbiter.build")
 
-local function find_or_build()
-  local release_dir = plugin_root .. "/target/release"
+local is_windows = (vim.uv or vim.loop).os_uname().sysname:lower():match("windows")
 
-  local dylib_path = release_dir .. "/libarbiter.dylib"
-  if vim.uv.fs_stat(dylib_path) then
-    return dylib_path
+local function resolve_path(path)
+  local resolved = vim.fn.fnamemodify(path, ":p")
+  if is_windows then
+    resolved = resolved:gsub("/", "\\")
   end
-
-  local so_path = release_dir .. "/libarbiter.so"
-  if vim.uv.fs_stat(so_path) then
-    return so_path
-  end
-
-  vim.notify("[arbiter] Building from source...", vim.log.levels.INFO)
-  local cmd = "cd " .. vim.fn.shellescape(plugin_root) .. " && cargo build --release"
-  vim.fn.system(cmd)
-  if vim.v.shell_error ~= 0 then
-    vim.notify("[arbiter] Build failed. Run `cargo build --release` in " .. plugin_root, vim.log.levels.ERROR)
-    return nil
-  end
-
-  if vim.uv.fs_stat(dylib_path) then
-    return dylib_path
-  end
-  if vim.uv.fs_stat(so_path) then
-    return so_path
-  end
-
-  vim.notify("[arbiter] Build succeeded but library not found", vim.log.levels.ERROR)
-  return nil
+  return resolved
 end
 
-local lib_path = find_or_build()
-if not lib_path then
-  error("[arbiter] Could not build or find native module")
+local function try_load_library()
+  local paths = build.get_search_paths()
+
+  for _, path_pattern in ipairs(paths) do
+    local actual_path = resolve_path(path_pattern:gsub("%?", "arbiter"))
+    local stat = vim.uv.fs_stat(actual_path)
+    if stat and stat.type == "file" then
+      local loader, err = package.loadlib(actual_path, "luaopen_arbiter")
+      if err then
+        return nil, string.format("Error loading library from %s: %s", actual_path, err)
+      end
+      if loader then
+        return loader()
+      end
+    end
+  end
+
+  return nil, "No valid library found in any search path"
 end
 
-local loader = package.loadlib(lib_path, "luaopen_arbiter")
-if not loader then
-  error("[arbiter] Failed to load " .. lib_path)
+local backend, load_err = try_load_library()
+
+if not backend then
+  build.download_or_build_binary()
+  backend, load_err = try_load_library()
 end
 
-return loader()
+if not backend then
+  local paths = build.get_search_paths()
+  local resolved = {}
+  for _, p in ipairs(paths) do
+    table.insert(resolved, resolve_path(p:gsub("%?", "arbiter")))
+  end
+
+  error(string.format(
+    "[arbiter] Failed to load native module.\nError: %s\nSearched paths:\n%s\n"
+      .. "Build with `cargo build --release` or run:\n"
+      .. '  :lua require("arbiter.build").download_or_build_binary()',
+    tostring(load_err),
+    table.concat(resolved, "\n")
+  ))
+end
+
+return backend

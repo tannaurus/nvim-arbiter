@@ -47,8 +47,11 @@ vim.g.mapleader = " "  -- space as leader, for example
 
 ```lua
 {
-  "your-org/arbiter",
-  build = "cargo build --release",
+  "tannaurus/nvim-arbiter",
+  tag = "v0.1.0",  -- pin to a release tag
+  build = function()
+    require("arbiter.build").download_or_build_binary()
+  end,
   opts = {
     backend = "cursor",
     review = {
@@ -58,13 +61,13 @@ vim.g.mapleader = " "  -- space as leader, for example
 }
 ```
 
-The `build` step compiles the Rust library on install/update. If the library isn't found at load time, the plugin will attempt to build it automatically.
+When the plugin is installed or updated to a tagged commit, the `build` function first tries to download a prebuilt binary from the matching GitHub Release. If no prebuilt is available, it falls back to `cargo build --release`. If the library isn't found at load time, the plugin triggers this process automatically. You can rebuild at any time with lazy.nvim's `gb` key.
 
 ### packer.nvim
 
 ```lua
 use {
-  "your-org/arbiter",
+  "tannaurus/nvim-arbiter",
   run = "cargo build --release",
   config = function()
     require("arbiter").setup({
@@ -80,7 +83,7 @@ use {
 1. Clone the repo into your Neovim packages directory or anywhere on your `runtimepath`:
 
 ```bash
-git clone https://github.com/your-org/arbiter.git ~/.local/share/nvim/site/pack/plugins/start/arbiter
+git clone https://github.com/tannaurus/nvim-arbiter.git ~/.local/share/nvim/site/pack/plugins/start/arbiter
 cd ~/.local/share/nvim/site/pack/plugins/start/arbiter
 cargo build --release
 ```
@@ -98,9 +101,26 @@ require("arbiter").setup({
 
 ### How the native library loads
 
-The Lua loader in `lua/arbiter/init.lua` looks for the compiled library at `target/release/libarbiter.dylib` (macOS) or `target/release/libarbiter.so` (Linux) relative to the plugin root. It loads the dylib directly from the build output rather than copying it, which avoids macOS code signature invalidation. If the library isn't found, it runs `cargo build --release` automatically.
+On install or update, the `build` hook calls `arbiter.build.download_or_build_binary()` which:
 
-This means the full repository (including `target/`) must be present - you cannot install just the Lua files.
+1. **Tries to download a prebuilt binary** from GitHub Releases matching the current git tag (e.g. `v0.1.0`). Binaries are available for Linux (glibc/musl, x86_64/aarch64) and macOS (x86_64/aarch64). If the current commit is not a tagged release, the download is skipped.
+2. **Validates the download** by loading it with `package.loadlib` before replacing the current binary (atomic `.tmp` rename).
+3. **Falls back to `cargo build --release`** if no prebuilt binary is available or the download fails.
+
+At load time, `lua/arbiter/init.lua` searches multiple paths for the compiled library:
+- `target/release/libarbiter.{dylib,so}` (relative to plugin root)
+- `$CARGO_TARGET_DIR/release/libarbiter.{dylib,so}` (if set)
+
+If no library is found, it triggers the download-or-build process automatically.
+
+The library is loaded directly from the build output via `package.loadlib` (not Lua `require`), which avoids macOS code signature invalidation from file copies. You can rebuild at any time with lazy.nvim's `gb` key.
+
+### Health check
+
+Run `:checkhealth arbiter` to verify your installation. It checks:
+- Binary exists and loads correctly
+- `cargo`, `git`, and a backend CLI are on `$PATH`
+- All library search paths
 
 ## Configuration
 
