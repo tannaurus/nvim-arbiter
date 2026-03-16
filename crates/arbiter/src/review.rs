@@ -1026,7 +1026,24 @@ fn handle_accept_hunk(review: &mut Review) {
         }
     } else {
         mark_hunk_accepted(review, &hash);
+        let was_unapproved = review
+            .current_file
+            .as_ref()
+            .and_then(|p| review.files.iter().find(|(fp, _, _)| fp == p))
+            .is_some_and(|(_, _, rs)| *rs != ReviewStatus::Approved);
         check_all_hunks_accepted(review);
+        let now_approved = review
+            .current_file
+            .as_ref()
+            .and_then(|p| review.files.iter().find(|(fp, _, _)| fp == p))
+            .is_some_and(|(_, _, rs)| *rs == ReviewStatus::Approved);
+        if was_unapproved && now_approved {
+            save_accepted_hunks(review);
+            save_file_statuses(review);
+            rerender_file_panel(review);
+            handle_next_unreviewed(review);
+            return;
+        }
     }
     save_accepted_hunks(review);
     save_file_statuses(review);
@@ -1705,15 +1722,17 @@ fn handle_ga(review: &mut Review) {
         review.accepted_hunks.insert(path.clone(), all_hashes);
 
         resolve_threads_for_file(review, &path);
-        select_file_impl(review, &review.current_file.clone().unwrap_or_default());
+        save_file_statuses(review);
+        rerender_file_panel(review);
+        handle_next_unreviewed(review);
     } else {
         review.file_content_hash.remove(&path);
         review.accepted_hunks.remove(&path);
 
         select_file_impl(review, &path);
+        save_file_statuses(review);
+        rerender_file_panel(review);
     }
-    save_file_statuses(review);
-    rerender_file_panel(review);
 }
 
 fn handle_gx(review: &mut Review) {

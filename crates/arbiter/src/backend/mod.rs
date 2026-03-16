@@ -94,8 +94,14 @@ pub fn cancel_all() {
 ///
 /// Other requests are left untouched. Use this instead of `cancel_all`
 /// when replying in a thread to avoid interrupting unrelated sessions.
+/// If the in-flight request matches, its child process is killed so the
+/// adapter thread unblocks and the queue advances immediately.
 pub fn cancel_tagged(tag: &str) {
-    queue::cancel_tagged(tag)
+    let was_inflight = queue::inflight_tag().as_deref() == Some(tag);
+    queue::cancel_tagged(tag);
+    if was_inflight {
+        kill_tracked_children();
+    }
 }
 
 /// Returns the tag (thread ID) of the currently in-flight request, if any.
@@ -129,6 +135,19 @@ pub(crate) fn track_child(handle: &SharedChild) {
         .lock()
         .expect("children lock")
         .push(Arc::clone(handle));
+}
+
+/// Kills all tracked child processes without removing them from the list.
+///
+/// The adapter thread will call `untrack_child` when it resumes after
+/// the stdout pipe closes. Used by `cancel_tagged` to unblock the
+/// in-flight adapter so the queue can advance to the next request.
+fn kill_tracked_children() {
+    let children = CHILDREN.lock().expect("children lock");
+    for h in children.iter() {
+        let child = &mut *h.lock().expect("child lock");
+        let _ = child.kill();
+    }
 }
 
 /// Removes a child handle after it exits normally.
