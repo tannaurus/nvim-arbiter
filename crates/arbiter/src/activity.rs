@@ -33,7 +33,7 @@ pub fn set_busy(busy: bool) {
 /// Returns a statusline-friendly string.
 ///
 /// Empty when idle. Shows elapsed seconds when the backend is busy,
-/// e.g. `[agent thinking... 12s]`.
+/// e.g. `[agent thinking... 12s]` or `[agent thinking... 12s | 2 queued]`.
 pub fn statusline_component() -> String {
     if !BUSY.load(Ordering::SeqCst) {
         return String::new();
@@ -43,7 +43,12 @@ pub fn statusline_component() -> String {
         return String::new();
     }
     let elapsed_secs = (now_millis() - start) / 1000;
-    format!("[agent thinking... {elapsed_secs}s]")
+    let queued = crate::backend::pending_count();
+    if queued > 0 {
+        format!("[agent thinking... {elapsed_secs}s | {queued} queued]")
+    } else {
+        format!("[agent thinking... {elapsed_secs}s]")
+    }
 }
 
 #[cfg(test)]

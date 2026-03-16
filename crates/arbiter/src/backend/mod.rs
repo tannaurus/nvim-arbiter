@@ -109,6 +109,11 @@ pub fn inflight_tag() -> Option<String> {
     queue::inflight_tag()
 }
 
+/// Returns the number of requests waiting in the queue (excludes in-flight).
+pub fn pending_count() -> usize {
+    queue::pending_count()
+}
+
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static CHILDREN: Mutex<Vec<Arc<Mutex<Child>>>> = Mutex::new(Vec::new());
 

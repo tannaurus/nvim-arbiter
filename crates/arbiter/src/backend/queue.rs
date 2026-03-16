@@ -113,6 +113,11 @@ fn process_next() {
     }
 }
 
+/// Returns the number of items waiting in the queue (excludes in-flight).
+pub(super) fn pending_count() -> usize {
+    QUEUE.lock().expect("queue lock").len()
+}
+
 /// Returns true if the queue has pending items or one is in flight.
 #[cfg(test)]
 pub(super) fn is_busy() -> bool {

@@ -1295,6 +1295,11 @@ fn is_unreviewed_file(review: &Review, idx: usize) -> bool {
     file_has_open_threads(&review.threads, path)
 }
 
+fn push_jumplist_mark(review: &Review) {
+    let _ = api::set_current_win(&review.diff_panel.win);
+    let _ = api::command("normal! m'");
+}
+
 fn handle_next_unreviewed(review: &mut Review) {
     if review.files.is_empty() {
         return;
@@ -1309,6 +1314,7 @@ fn handle_next_unreviewed(review: &mut Review) {
         let idx = (current_idx + offset) % len;
         if is_unreviewed_file(review, idx) {
             if let Some((path, _, _)) = review.files.get(idx) {
+                push_jumplist_mark(review);
                 let path = path.clone();
                 select_file_impl(review, &path);
             }
