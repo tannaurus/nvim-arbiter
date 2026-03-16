@@ -2246,7 +2246,7 @@ fn nav_thread_directed(review: &mut Review, forward: bool) {
             review
                 .threads
                 .get(i)
-                .map_or(false, |t| t.status == ThreadStatus::Open)
+                .is_some_and(|t| t.status == ThreadStatus::Open)
         })
         .collect();
 
