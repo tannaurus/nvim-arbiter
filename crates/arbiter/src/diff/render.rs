@@ -44,6 +44,7 @@ pub fn render(
     file_path: &str,
     show_resolved: bool,
     new_hunk_buf_starts: Option<&HashSet<usize>>,
+    accepted_hashes: &HashSet<String>,
 ) -> nvim_oxi::Result<(Vec<Hunk>, HashMap<String, usize>)> {
     let hunks = parse::parse_hunks(diff_text);
     let diff_lines: Vec<String> = diff_text.lines().map(|s| s.to_string()).collect();
@@ -120,12 +121,19 @@ pub fn render(
 
     set_buffer_lines(buf, &all_lines)?;
 
+    let accepted_buf_starts: HashSet<usize> = adjusted_hunks
+        .iter()
+        .filter(|h| accepted_hashes.contains(&h.content_hash))
+        .map(|h| h.buf_start)
+        .collect();
+
     apply_highlights(
         buf,
         &adjusted_hunks,
         &visible,
         &all_lines,
         new_hunk_buf_starts,
+        &accepted_buf_starts,
     )?;
 
     Ok((adjusted_hunks, thread_buf_lines))
@@ -134,12 +142,14 @@ pub fn render(
 /// Applies syntax highlighting to the diff buffer.
 ///
 /// If `new_hunk_buf_starts` contains a hunk's buf_start, also adds ArbiterHunkNew.
+/// Accepted hunks (buf_start in `accepted_buf_starts`) get ArbiterHunkAccepted on all lines.
 pub fn apply_highlights(
     buf: &mut Buffer,
     hunks: &[Hunk],
     summaries: &[&ThreadSummary],
     lines: &[String],
     new_hunk_buf_starts: Option<&HashSet<usize>>,
+    accepted_buf_starts: &HashSet<usize>,
 ) -> nvim_oxi::Result<()> {
     let ns = api::create_namespace("arbiter-diff");
     let _ = buf.clear_namespace(ns, 0..usize::MAX);
@@ -163,6 +173,13 @@ pub fn apply_highlights(
 
     let offset = line_idx;
     for h in hunks {
+        let is_accepted = accepted_buf_starts.contains(&h.buf_start);
+        if is_accepted {
+            for i in h.buf_start..=h.buf_end {
+                buf.add_highlight(ns, "ArbiterHunkAccepted", i, 0..)?;
+            }
+            continue;
+        }
         let is_new = new_hunk_buf_starts
             .map(|s| s.contains(&h.buf_start))
             .unwrap_or(false);
@@ -307,22 +324,37 @@ pub fn close_side_by_side(
 /// Creates manual folds for each hunk in the diff buffer.
 ///
 /// Sets foldmethod=manual and creates one fold per hunk. When `file_approved`
-/// is true, hunks start folded. Fold text shows line count and "approved" when
-/// the file is approved. Caller should pass the diff panel window so fold
-/// commands run in the correct buffer context.
+/// is true, all hunks start folded. Accepted hunks (buf_start in
+/// `accepted_buf_starts`) are always folded and get "[accepted]" in their fold
+/// text via an inline foldtext expression.
 pub fn set_hunk_folds(
     buf: &mut Buffer,
     win: &Window,
     hunks: &[Hunk],
     file_approved: bool,
+    accepted_buf_starts: &HashSet<usize>,
 ) -> nvim_oxi::Result<()> {
     let win_opts = OptionOpts::builder().win(win.clone()).build();
     api::set_option_value("foldmethod", "manual", &win_opts)?;
     api::set_option_value("foldenable", true, &win_opts)?;
     buf.set_var("agent_file_approved", file_approved)?;
+
+    let mut staged_dict = nvim_oxi::Dictionary::new();
+    for h in hunks {
+        if accepted_buf_starts.contains(&h.buf_start) {
+            let key = nvim_oxi::String::from(format!("{}", h.buf_start + 1));
+            staged_dict.insert(key, nvim_oxi::Object::from(true));
+        }
+    }
+    buf.set_var("arbiter_accepted_folds", staged_dict)?;
     api::set_option_value(
         "foldtext",
-        "v:folddashes.(v:foldend-v:foldstart+1).' lines'.(get(b:,'agent_file_approved',0)?' [approved]':'')",
+        concat!(
+            "v:folddashes.(v:foldend-v:foldstart+1).' lines'",
+            ".(has_key(get(b:,'arbiter_accepted_folds',{}),string(v:foldstart))",
+            "?' [accepted]'",
+            ":(get(b:,'agent_file_approved',0)?' [approved]':''))",
+        ),
         &win_opts,
     )?;
 
@@ -341,11 +373,17 @@ pub fn set_hunk_folds(
         win_exec(wid, "normal! zM");
     } else {
         win_exec(wid, "normal! zR");
+        for h in hunks {
+            if accepted_buf_starts.contains(&h.buf_start) {
+                let start = (h.buf_start + 1) as i64;
+                win_exec(wid, &format!("{start}foldclose"));
+            }
+        }
     }
     Ok(())
 }
 
-fn win_exec(wid: i32, cmd: &str) {
+pub fn win_exec(wid: i32, cmd: &str) {
     let escaped = cmd.replace('\'', "''");
     let _ = api::command(&format!("call win_execute({wid}, '{escaped}')"));
 }

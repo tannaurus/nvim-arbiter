@@ -196,10 +196,13 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
             );
             let lc = buf.line_count().unwrap_or(1);
             let last_idx = lc.saturating_sub(1);
-            let lines = buf.get_lines(0..=last_idx, false)?;
-            let last = lines.last().map(|s| s.to_string()).unwrap_or_default();
+            let last = buf
+                .get_lines(last_idx..=last_idx, false)?
+                .next()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             let combined = format!("{last}{text}");
-            let refs: Vec<&str> = combined.lines().collect();
+            let refs: Vec<&str> = combined.split('\n').collect();
             let _ = buf.set_lines(last_idx..=last_idx, false, refs);
             let _ = api::set_option_value(
                 "modifiable",
@@ -219,10 +222,13 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
                 );
                 let lc = buf.line_count().unwrap_or(1);
                 let last_idx = lc.saturating_sub(1);
-                let lines = buf.get_lines(0..=last_idx, false)?;
-                let last = lines.last().map(|s| s.to_string()).unwrap_or_default();
+                let last = buf
+                    .get_lines(last_idx..=last_idx, false)?
+                    .next()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 let combined = format!("{last}{text}");
-                let refs: Vec<&str> = combined.lines().collect();
+                let refs: Vec<&str> = combined.split('\n').collect();
                 let _ = buf.set_lines(last_idx..=last_idx, false, refs);
                 let _ = api::set_option_value(
                     "modifiable",

@@ -28,6 +28,9 @@ pub struct FileState {
     pub content_hash: String,
     /// Unix timestamp of last update.
     pub updated_at: i64,
+    /// Content hashes of individually accepted hunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted_hunks: Vec<String>,
 }
 
 /// A persisted session record for `:ArbiterList` / `:ArbiterResume`.
@@ -234,6 +237,7 @@ mod tests {
                 status: ReviewStatus::Approved,
                 content_hash: "abc123".to_string(),
                 updated_at: 1710000000,
+                accepted_hunks: Vec::new(),
             },
         );
         save_review(dir, &ws, "main", &state);

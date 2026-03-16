@@ -86,7 +86,7 @@ pub fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
             }
             if let Some(mut hunk) = parse_hunk_header(line, &content) {
                 hunk.buf_start = hunk_start;
-                hunk.buf_end = hunk_start + content.len();
+                hunk.buf_end = j - 1;
                 hunks.push(hunk);
             }
             i = j;
@@ -157,6 +157,9 @@ pub fn buf_line_to_source(
             let Some(line) = lines.get(i).map(|s| s.as_ref()) else {
                 break;
             };
+            if line == "\\ No newline at end of file" {
+                continue;
+            }
             if i == buf_line {
                 return Some(SourceLocation {
                     file: file_path.to_string(),
@@ -198,7 +201,7 @@ pub fn source_to_buf_line(
             let Some(line) = lines.get(i).map(|s| s.as_ref()) else {
                 break;
             };
-            if line.starts_with("@@ ") {
+            if line.starts_with("@@ ") || line == "\\ No newline at end of file" {
                 continue;
             }
             let is_delete = line.starts_with('-') && !line.starts_with("---");
@@ -238,6 +241,7 @@ pub fn synthesize_untracked(contents: &str, path: &str) -> String {
     out
 }
 
+/// Extracts a minimal valid git patch for a single hunk from raw diff text.
 /// Compares old content hashes against new hunks.
 ///
 /// Returns buf_start lines for hunks that are new or changed.

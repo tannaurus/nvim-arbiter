@@ -81,8 +81,6 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                 Box::new(|res| {
                     if let Some(e) = res.error.as_ref() {
                         let _ = response_panel::append(&format!("\nError: {e}"));
-                    } else {
-                        let _ = response_panel::append(&res.text);
                     }
                 }),
             );
@@ -110,8 +108,6 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                     Box::new(|res| {
                         if let Some(e) = res.error.as_ref() {
                             let _ = response_panel::append(&format!("\nError: {e}"));
-                        } else {
-                            let _ = response_panel::append(&res.text);
                         }
                     }),
                     None,
@@ -123,8 +119,6 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                     Box::new(|res| {
                         if let Some(e) = res.error.as_ref() {
                             let _ = response_panel::append(&format!("\nError: {e}"));
-                        } else {
-                            let _ = response_panel::append(&res.text);
                         }
                     }),
                 );
@@ -297,8 +291,6 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                 Box::new(|res| {
                     if let Some(e) = res.error.as_ref() {
                         let _ = response_panel::append(&format!("\nError: {e}"));
-                    } else {
-                        let _ = response_panel::append(&res.text);
                     }
                 }),
                 None,
@@ -316,7 +308,7 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                 let cwd = r.cwd.clone();
                 let ref_name = r.ref_name.clone();
                 let cfg = config::get();
-                let prompt_template = cfg.prompts.self_review.clone();
+                let prompt_guidance = cfg.prompts.self_review.clone();
                 let is_cursor = matches!(cfg.backend, config::BackendKind::Cursor);
                 git::diff_full(&cwd, &ref_name, move |result| {
                     let diff_text = if result.success() {
@@ -329,7 +321,9 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                         );
                         return;
                     };
-                    let prompt = prompt_template.replace("%s", &diff_text);
+                    let full_template =
+                        format!("{}{}", prompt_guidance, config::SELF_REVIEW_FORMAT_SUFFIX);
+                    let prompt = full_template.replace("%s", &diff_text);
                     let json_schema = if is_cursor {
                         None
                     } else {
@@ -488,6 +482,16 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
         },
         &CreateCommandOpts::builder()
             .nargs(CommandNArgs::ZeroOrOne)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterSummary",
+        |_args: CommandArgs| {
+            with_review_cmd(review::show_summary);
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
             .build(),
     )?;
 

@@ -20,6 +20,7 @@ Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a 
 - **Side-by-side diff** - Native `:diffthis` view with syntax highlighting in a separate tabpage
 - **Directory folding** - Collapse/expand directories in the file panel with `<CR>`
 - **Review status tracking** - Mark files as approved, needs-changes, or unreviewed; persisted across sessions
+- **Hunk acceptance checklist** - Accept individual hunks to track progress within a file; auto-approves the file when all hunks are accepted
 - **Auto-resolve** - Simple feedback that auto-approves once the agent applies the change
 - **Self-review** - Agent reviews its own diff and flags uncertainties as threads
 - **Thread filters** - View all threads, or filter by agent-created, user-created, or resolved
@@ -44,7 +45,7 @@ Arbiter is designed for a specific loop: an AI agent writes code, you review it,
 
 5. **The agent revises.** The agent reads your feedback and makes changes. Arbiter polls the filesystem and updates the diff automatically - you see changes appear without refreshing.
 
-6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Press `<Leader>as` for a summary of where you stand.
+6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Accept individual hunks with `<Leader>as` to track your progress within a file - when all hunks are accepted, the file is auto-approved. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Run `:ArbiterSummary` for a summary of where you stand.
 
 7. **Repeat.** Continue reviewing, commenting, and approving until the changeset looks right. Close the workbench with `q` when you're done. Your review state (approvals, threads, conversations) is persisted to disk and restored if you reopen.
 
@@ -228,8 +229,9 @@ require("arbiter").setup({
     -- Prompt sent by :ArbiterCatchUp
     catch_up = "Summarize the changes you've made and the current state of the project.",
 
-    -- Prompt sent by :ArbiterSelfReview. %s = diff.
-    self_review = "Review this diff and flag anything you're uncertain about or want feedback on. For each concern, specify the file, line number, and your question.",
+    -- Review guidance sent by :ArbiterSelfReview.
+    -- Format instructions (THREAD|file|line|message) are appended automatically.
+    self_review = "Review this diff and flag anything you're uncertain about or want feedback on.",
   },
 
   -- Extra CLI flags appended to every backend invocation.
@@ -256,7 +258,6 @@ require("arbiter").setup({
     approve = "<Leader>aa",
     needs_changes = "<Leader>ax",
     reset_status = "<Leader>ar",
-    summary = "<Leader>as",
     comment = "<Leader>ac",
     auto_resolve = "<Leader>aA",
     open_thread = "<Leader>ao",
@@ -272,6 +273,7 @@ require("arbiter").setup({
     cancel_request = "<Leader>aK",
     next_unreviewed = "<Leader>an",
     prev_unreviewed = "<Leader>ap",
+    accept_hunk = "<Leader>as",
   },
 })
 ```
@@ -370,6 +372,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterSelfReview` | Run agent self-review on the current diff. Creates agent threads. |
 | `:ArbiterRefresh` | Refresh the file list and current file diff. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
+| `:ArbiterSummary` | Show review summary popup (file/thread counts). |
 
 ## Keybindings
 
@@ -379,18 +382,18 @@ All keybindings are active in the review workbench tabpage and are fully configu
 
 | Default | Action |
 |---------|--------|
-| `]c` / `[c` | Next / previous hunk |
+| `]c` / `[c` | Next / previous hunk (scrolls hunk into view) |
 | `]f` / `[f` | Next / previous file |
-| `]t` / `[t` | Next / previous thread |
+| `]t` / `[t` | Next / previous open thread (skips resolved, crosses files) |
 
 ### Review status
 
 | Default | Action |
 |---------|--------|
-| `<Leader>aa` | Toggle approval on current file |
+| `<Leader>aa` | Toggle approval on current file (or resolve thread if cursor is on a thread summary) |
 | `<Leader>ax` | Mark as needs-changes |
 | `<Leader>ar` | Reset to unreviewed |
-| `<Leader>as` | Show review summary popup |
+| `<Leader>as` | Accept/unaccept the hunk under the cursor (auto-approves file when all hunks accepted) |
 | `<Leader>an` | Jump to next unreviewed file |
 | `<Leader>ap` | Jump to previous unreviewed file |
 

@@ -192,13 +192,27 @@ impl<'de> Deserialize<'de> for PanelPosition {
     }
 }
 
+/// Format instructions appended to every self-review prompt.
+///
+/// This is not user-configurable because the parser in
+/// `backend::parse_self_review_text` depends on this exact wire format.
+pub const SELF_REVIEW_FORMAT_SUFFIX: &str = concat!(
+    " For each concern, output a line in exactly this format:\n\n",
+    "THREAD|file/path|line_number|your question or concern\n\n",
+    "Example:\n",
+    "THREAD|src/lib.rs|42|This unwrap could panic if the input is empty\n\n",
+    "Output ONLY THREAD lines, no other text.",
+);
+
 /// Prompt template configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PromptConfig {
     /// Catch-up summarization prompt.
     pub catch_up: String,
-    /// Self-review prompt.
+    /// Self-review guidance. Format instructions for the THREAD wire format
+    /// are appended automatically; this field controls only the review
+    /// direction (what to look for, tone, scope, etc.).
     pub self_review: String,
 }
 
@@ -207,8 +221,9 @@ impl Default for PromptConfig {
         Self {
             catch_up: "Summarize the changes you've made and the current state of the project."
                 .to_string(),
-            self_review: "Review this diff and flag anything you're uncertain about or want feedback on. For each concern, specify the file, line number, and your question."
-                .to_string(),
+            self_review:
+                "Review this diff and flag anything you're uncertain about or want feedback on."
+                    .to_string(),
         }
     }
 }
@@ -240,8 +255,6 @@ pub struct KeymapConfig {
     pub needs_changes: String,
     /// Reset current file's review status to unreviewed.
     pub reset_status: String,
-    /// Show review summary popup.
-    pub summary: String,
     /// Add a comment and send it to the agent.
     pub comment: String,
     /// Add a comment with auto-resolve (auto-approved once the agent applies it).
@@ -272,6 +285,8 @@ pub struct KeymapConfig {
     pub next_unreviewed: String,
     /// Jump to previous file with open threads or non-approved status.
     pub prev_unreviewed: String,
+    /// Toggle the hunk under the cursor as accepted in the review checklist.
+    pub accept_hunk: String,
 }
 
 impl Default for KeymapConfig {
@@ -287,7 +302,6 @@ impl Default for KeymapConfig {
             approve: "<Leader>aa".to_string(),
             needs_changes: "<Leader>ax".to_string(),
             reset_status: "<Leader>ar".to_string(),
-            summary: "<Leader>as".to_string(),
             comment: "<Leader>ac".to_string(),
             auto_resolve: "<Leader>aA".to_string(),
             open_thread: "<Leader>ao".to_string(),
@@ -303,6 +317,7 @@ impl Default for KeymapConfig {
             cancel_request: "<Leader>aK".to_string(),
             next_unreviewed: "<Leader>an".to_string(),
             prev_unreviewed: "<Leader>ap".to_string(),
+            accept_hunk: "<Leader>as".to_string(),
         }
     }
 }

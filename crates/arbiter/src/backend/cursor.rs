@@ -99,7 +99,7 @@ impl Adapter for CursorAdapter {
 
                 let mut text = String::new();
                 let mut session_id = String::new();
-                let mut cumulative_len = 0usize;
+                let mut prev_combined = String::new();
 
                 if let Some(pipe) = child.stdout.take() {
                     let reader = BufReader::new(pipe);
@@ -118,30 +118,33 @@ impl Adapter for CursorAdapter {
                         }
                         match ev.kind.as_str() {
                             "assistant" => {
-                                let chunk = ev
+                                let combined: String = ev
                                     .message
-                                    .and_then(|m| m.content.into_iter().next())
-                                    .and_then(|c| c.text);
-                                if let Some(t) = chunk {
-                                    let delta = if t.len() > cumulative_len {
-                                        &t[cumulative_len..]
-                                    } else {
-                                        &t
-                                    };
-                                    if !delta.is_empty() {
-                                        if let Some(ref cb) = on_stream {
-                                            let cb = Arc::clone(cb);
-                                            let d = delta.to_string();
-                                            crate::dispatch::schedule(move || cb(&d));
-                                        }
+                                    .into_iter()
+                                    .flat_map(|m| m.content)
+                                    .filter_map(|c| c.text)
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                if combined.len() > prev_combined.len()
+                                    && combined.starts_with(&prev_combined)
+                                {
+                                    let delta = &combined[prev_combined.len()..];
+                                    if let Some(ref cb) = on_stream {
+                                        let cb = Arc::clone(cb);
+                                        let d = delta.to_string();
+                                        crate::dispatch::schedule(move || cb(&d));
                                     }
-                                    cumulative_len = t.len();
-                                    text = t;
+                                }
+                                if !combined.is_empty() {
+                                    prev_combined = combined.clone();
+                                    text = combined;
                                 }
                             }
                             "result" => {
-                                if let Some(t) = ev.result {
-                                    text = t;
+                                if on_stream.is_none() {
+                                    if let Some(t) = ev.result {
+                                        text = t;
+                                    }
                                 }
                             }
                             _ => {}

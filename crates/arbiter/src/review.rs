@@ -23,7 +23,7 @@ use nvim_oxi::api::{self};
 use nvim_oxi::Dictionary;
 use nvim_oxi::IntoResult;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -125,6 +125,12 @@ pub struct Review {
     pub thread_inline_marks: HashMap<usize, String>,
     /// Thread to open after the next diff render completes.
     pub pending_thread_open: Option<String>,
+    /// Raw diff text for the current file. Retained so individual hunks
+    /// can be extracted for staging without re-running git.
+    pub current_diff_text: String,
+    /// Per-file accepted hunk content hashes (review checklist).
+    /// Used to fold and dim accepted hunks in the diff panel. Persisted in review state.
+    pub accepted_hunks: HashMap<String, HashSet<String>>,
 }
 
 /// Runs a closure with the active Review, if one exists.
@@ -251,24 +257,29 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
         nvim_oxi::api::Buffer,
         nvim_oxi::api::Window,
     )> {
-        let diff_panel_buf = api::create_buf(false, true)?;
+        let mut diff_panel_buf = api::create_buf(false, true)?;
         api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(diff_panel_buf.clone()).build())?;
         api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(diff_panel_buf.clone()).build())?;
         api::set_option_value("filetype", "diff", &OptionOpts::builder().buffer(diff_panel_buf.clone()).build())?;
+        diff_panel_buf.set_name("[arbiter] diff")?;
 
         let mut diff_panel_win = api::get_current_win();
         diff_panel_win.set_buf(&diff_panel_buf)?;
+        let dp_opts = OptionOpts::builder().win(diff_panel_win.clone()).build();
+        api::set_option_value("winbar", " [arbiter] diff", &dp_opts)?;
 
         api::command("topleft vertical 40split")?;
         let mut file_panel_win = api::get_current_win();
 
-        let file_panel_buf = api::create_buf(false, true)?;
+        let mut file_panel_buf = api::create_buf(false, true)?;
         api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(file_panel_buf.clone()).build())?;
         api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(file_panel_buf.clone()).build())?;
+        file_panel_buf.set_name("[arbiter] files")?;
         file_panel_win.set_buf(&file_panel_buf)?;
         let fp_opts = OptionOpts::builder().win(file_panel_win.clone()).build();
         api::set_option_value("foldenable", false, &fp_opts)?;
         api::set_option_value("winfixwidth", true, &fp_opts)?;
+        api::set_option_value("winbar", " [arbiter] files", &fp_opts)?;
 
         api::command("wincmd l")?;
 
@@ -373,7 +384,11 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         }
                     };
 
-                    let current_file = files.first().map(|(p, _, _)| p.clone());
+                    let current_file = files
+                        .iter()
+                        .find(|(_, _, rs)| *rs != ReviewStatus::Approved)
+                        .or_else(|| files.first())
+                        .map(|(p, _, _)| p.clone());
 
                     let mut review = Review {
                         ref_name: ref_name.clone(),
@@ -408,6 +423,13 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         file_panel_line_to_dir: render_result.line_to_dir,
                         thread_inline_marks: HashMap::new(),
                         pending_thread_open: None,
+                        current_diff_text: String::new(),
+                        accepted_hunks: review_state
+                            .files
+                            .iter()
+                            .filter(|(_, f)| !f.accepted_hunks.is_empty())
+                            .map(|(p, f)| (p.clone(), f.accepted_hunks.iter().cloned().collect()))
+                            .collect(),
                     };
 
                     set_close_keymap(&mut review.file_panel.buf);
@@ -417,6 +439,14 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
 
                     if let Some(path) = &current_file {
                         select_file_impl(&mut review, path);
+                        let panel_line = review
+                            .file_panel_line_to_path
+                            .iter()
+                            .find(|(_, p)| *p == path)
+                            .map(|(l, _)| *l);
+                        if let Some(line) = panel_line {
+                            let _ = review.file_panel.win.set_cursor(line + 1, 0);
+                        }
                     }
 
                     poll::start(&cwd);
@@ -531,7 +561,6 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
     let approve = config.keymaps.approve.clone();
     let needs_changes = config.keymaps.needs_changes.clone();
     let reset_status = config.keymaps.reset_status.clone();
-    let summary = config.keymaps.summary.clone();
     let comment = config.keymaps.comment.clone();
     let auto_resolve = config.keymaps.auto_resolve.clone();
     let open_thread = config.keymaps.open_thread.clone();
@@ -548,6 +577,7 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
     let cancel_request = config.keymaps.cancel_request.clone();
     let next_unreviewed = config.keymaps.next_unreviewed.clone();
     let prev_unreviewed = config.keymaps.prev_unreviewed.clone();
+    let accept_hunk = config.keymaps.accept_hunk.clone();
 
     let opts_cancel_request = SetKeymapOpts::builder()
         .callback(|_| {
@@ -663,17 +693,6 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, &reset_status, "", &opts_reset);
-
-    let opts_summary = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(handle_gs);
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(Mode::Normal, &summary, "", &opts_summary);
 
     let opts_refresh = SetKeymapOpts::builder()
         .callback(|_| {
@@ -905,6 +924,17 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, &prev_unreviewed, "", &opts_prev_unreviewed);
+
+    let opts_accept_hunk = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_accept_hunk);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, &accept_hunk, "", &opts_accept_hunk);
 }
 
 fn nav_next_hunk(review: &mut Review) {
@@ -919,10 +949,9 @@ fn nav_next_hunk(review: &mut Review) {
         .current_hunks
         .iter()
         .find(|h| h.buf_start > line_0)
-        .map(|h| h.buf_start)
-        .or_else(|| review.current_hunks.first().map(|h| h.buf_start));
-    if let Some(target) = next {
-        let _ = review.diff_panel.win.set_cursor(target + 1, 0);
+        .or_else(|| review.current_hunks.first());
+    if let Some(hunk) = next {
+        scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
     }
 }
 
@@ -938,11 +967,261 @@ fn nav_prev_hunk(review: &mut Review) {
         .current_hunks
         .iter()
         .rfind(|h| h.buf_start < line_0)
-        .map(|h| h.buf_start)
-        .or_else(|| review.current_hunks.last().map(|h| h.buf_start));
-    if let Some(target) = prev {
-        let _ = review.diff_panel.win.set_cursor(target + 1, 0);
+        .or_else(|| review.current_hunks.last());
+    if let Some(hunk) = prev {
+        scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
     }
+}
+
+fn scroll_to_hunk(review: &mut Review, buf_start: usize, buf_end: usize) {
+    let wid = review.diff_panel.win.handle();
+    let start_1 = (buf_start + 1) as i64;
+    let end_1 = (buf_end + 1) as i64;
+    let _ = review.diff_panel.win.set_cursor(buf_end + 1, 0);
+    diff::win_exec(wid, &format!("normal! {start_1}Gzt{end_1}G"));
+}
+
+fn accepted_for_file(review: &Review) -> HashSet<String> {
+    review
+        .current_file
+        .as_ref()
+        .and_then(|p| review.accepted_hunks.get(p))
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn handle_accept_hunk(review: &mut Review) {
+    let (row, _) = review
+        .diff_panel
+        .win
+        .get_cursor()
+        .into_result()
+        .unwrap_or((1, 0));
+    let line_0 = row.saturating_sub(1);
+
+    let Some(hunk) = review
+        .current_hunks
+        .iter()
+        .find(|h| line_0 >= h.buf_start && line_0 <= h.buf_end)
+    else {
+        let _ = api::notify(
+            "[arbiter] cursor is not inside a hunk",
+            nvim_oxi::api::types::LogLevel::Warn,
+            &Dictionary::default(),
+        );
+        return;
+    };
+    let hash = hunk.content_hash.clone();
+
+    let file_set = accepted_for_file(review);
+    if file_set.contains(&hash) {
+        unmark_hunk_accepted(review, &hash);
+        if let Some(path) = review.current_file.clone() {
+            if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
+                if *rs == ReviewStatus::Approved {
+                    *rs = ReviewStatus::Unreviewed;
+                    review.file_content_hash.remove(&path);
+                }
+            }
+        }
+    } else {
+        mark_hunk_accepted(review, &hash);
+        check_all_hunks_accepted(review);
+    }
+    save_accepted_hunks(review);
+    save_file_statuses(review);
+    rerender_file_panel(review);
+}
+
+fn mark_hunk_accepted(review: &mut Review, content_hash: &str) {
+    if let Some(path) = review.current_file.clone() {
+        review
+            .accepted_hunks
+            .entry(path)
+            .or_default()
+            .insert(content_hash.to_string());
+    }
+
+    let Some((buf_start, buf_end, new_start, new_count)) = review
+        .current_hunks
+        .iter()
+        .find(|h| h.content_hash == content_hash)
+        .map(|h| (h.buf_start, h.buf_end, h.new_start, h.new_count))
+    else {
+        return;
+    };
+
+    if let Some(path) = review.current_file.clone() {
+        resolve_threads_in_range(review, &path, new_start, new_count);
+    }
+
+    let ns = api::create_namespace("arbiter-diff");
+    for i in buf_start..=buf_end {
+        let _ = review.diff_panel.buf.clear_namespace(ns, i..i + 1);
+        let _ = review
+            .diff_panel
+            .buf
+            .add_highlight(ns, "ArbiterHunkAccepted", i, 0..);
+    }
+
+    update_accepted_fold_state(review);
+
+    let wid = review.diff_panel.win.handle();
+    let start = (buf_start + 1) as i64;
+    diff::win_exec(wid, &format!("{start}foldclose"));
+}
+
+fn unmark_hunk_accepted(review: &mut Review, content_hash: &str) {
+    if let Some(path) = review.current_file.as_ref() {
+        if let Some(set) = review.accepted_hunks.get_mut(path) {
+            set.remove(content_hash);
+            if set.is_empty() {
+                review.accepted_hunks.remove(path);
+            }
+        }
+    }
+
+    if let Some(path) = review.current_file.clone() {
+        select_file_impl(review, &path);
+    }
+}
+
+fn resolve_threads_in_range(review: &mut Review, path: &str, new_start: usize, new_count: usize) {
+    let end = new_start + new_count;
+    let mut changed = false;
+    for t in &mut review.threads {
+        if t.file == path
+            && t.status == ThreadStatus::Open
+            && (t.line as usize) >= new_start
+            && (t.line as usize) < end
+        {
+            threads::resolve(t);
+            changed = true;
+        }
+    }
+    if changed {
+        save_threads(review);
+    }
+}
+
+fn resolve_threads_for_file(review: &mut Review, path: &str) {
+    let mut changed = false;
+    for t in &mut review.threads {
+        if t.file == path && t.status == ThreadStatus::Open {
+            threads::resolve(t);
+            changed = true;
+        }
+    }
+    if changed {
+        save_threads(review);
+    }
+}
+
+fn save_threads(review: &Review) {
+    let sd = review.config.state_dir();
+    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
+    state::save_threads(&sd, &ws_hash, &review.ref_name, &review.threads);
+}
+
+fn check_all_hunks_accepted(review: &mut Review) {
+    if review.current_hunks.is_empty() {
+        return;
+    }
+    let file_set = accepted_for_file(review);
+    let all_accepted = review
+        .current_hunks
+        .iter()
+        .all(|h| file_set.contains(&h.content_hash));
+    if !all_accepted {
+        return;
+    }
+    let Some(path) = review.current_file.clone() else {
+        return;
+    };
+    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
+        if *rs != ReviewStatus::Approved {
+            *rs = ReviewStatus::Approved;
+            let full = Path::new(&review.cwd).join(&path);
+            let contents = std::fs::read_to_string(&full).unwrap_or_default();
+            review
+                .file_content_hash
+                .insert(path, state::content_hash(&contents));
+        }
+    }
+}
+
+fn save_file_statuses(review: &Review) {
+    let sd = review.config.state_dir();
+    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
+    let mut rs = state::ReviewState::default();
+    for (p, _, status) in &review.files {
+        rs.files
+            .insert(p.clone(), file_state_for(review, p, *status));
+    }
+    state::save_review(&sd, &ws_hash, &review.ref_name, &rs);
+}
+
+fn update_accepted_fold_state(review: &mut Review) {
+    let file_accepted = accepted_for_file(review);
+    let accepted_buf_starts: HashSet<usize> = review
+        .current_hunks
+        .iter()
+        .filter(|h| file_accepted.contains(&h.content_hash))
+        .map(|h| h.buf_start)
+        .collect();
+
+    let mut dict = nvim_oxi::Dictionary::new();
+    for bs in &accepted_buf_starts {
+        let key = nvim_oxi::String::from(format!("{}", bs + 1));
+        dict.insert(key, nvim_oxi::Object::from(true));
+    }
+    let _ = review
+        .diff_panel
+        .buf
+        .set_var("arbiter_accepted_folds", dict);
+}
+
+fn file_state_for(review: &Review, path: &str, status: ReviewStatus) -> state::FileState {
+    let ch = review
+        .file_content_hash
+        .get(path)
+        .cloned()
+        .unwrap_or_default();
+    let ah = review
+        .accepted_hunks
+        .get(path)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    state::FileState {
+        status,
+        content_hash: ch,
+        updated_at: now_secs(),
+        accepted_hunks: ah,
+    }
+}
+
+fn save_accepted_hunks(review: &Review) {
+    let sd = review.config.state_dir();
+    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
+    let mut rs = state::load_review(&sd, &ws_hash, &review.ref_name);
+    if let Some(path) = review.current_file.as_ref() {
+        let file_accepted: Vec<String> = review
+            .accepted_hunks
+            .get(path)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        let entry = rs
+            .files
+            .entry(path.clone())
+            .or_insert_with(|| state::FileState {
+                status: ReviewStatus::Unreviewed,
+                content_hash: String::new(),
+                updated_at: 0,
+                accepted_hunks: Vec::new(),
+            });
+        entry.accepted_hunks = file_accepted;
+    }
+    state::save_review(&sd, &ws_hash, &review.ref_name, &rs);
 }
 
 fn nav_next_file(review: &mut Review) {
@@ -1121,9 +1400,9 @@ fn make_thread_reply_callback(
                                         nvim_oxi::api::types::LogLevel::Warn,
                                         &Dictionary::default(),
                                     );
-                                }
-                                if threads::window_thread_id().as_deref() == Some(&tid) {
-                                    let _ = threads::replace_last_agent_message(&msg);
+                                    if threads::window_thread_id().as_deref() == Some(&tid) {
+                                        let _ = threads::replace_last_agent_message(&msg);
+                                    }
                                 }
                                 with_active(|r| {
                                     if let Some(t) = r.threads.iter_mut().find(|x| x.id == tid) {
@@ -1218,13 +1497,12 @@ fn handle_diff_cr(review: &mut Review) {
         .get_cursor()
         .into_result()
         .unwrap_or((1, 0));
-    let line = row;
-    let buf_line_0 = line.saturating_sub(1);
+    let buf_line_0 = row.saturating_sub(1);
 
     if let Some(tid) = review
         .thread_buf_lines
         .iter()
-        .find(|(_, &l)| l == line)
+        .find(|(_, &l)| l == buf_line_0)
         .map(|(t, _)| t.clone())
     {
         open_thread_by_id(review, &tid);
@@ -1251,12 +1529,9 @@ fn handle_diff_cr(review: &mut Review) {
             })
             .collect();
         let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-        if let Some(loc) = diff::buf_line_to_source(
-            &review.current_hunks,
-            line.saturating_sub(1),
-            &line_refs,
-            path,
-        ) {
+        if let Some(loc) =
+            diff::buf_line_to_source(&review.current_hunks, buf_line_0, &line_refs, path)
+        {
             let full = Path::new(&review.cwd).join(&loc.file);
             if full.exists() {
                 let _ = api::command(&format!("tabnew +{} {}", loc.line, full.display()));
@@ -1272,13 +1547,12 @@ fn handle_open_thread(review: &mut Review) {
         .get_cursor()
         .into_result()
         .unwrap_or((1, 0));
-    let line = row;
-    let buf_line_0 = line.saturating_sub(1);
+    let buf_line_0 = row.saturating_sub(1);
 
     if let Some(tid) = review
         .thread_buf_lines
         .iter()
-        .find(|(_, &l)| l == line)
+        .find(|(_, &l)| l == buf_line_0)
         .map(|(t, _)| t.clone())
     {
         open_thread_by_id(review, &tid);
@@ -1369,101 +1643,76 @@ fn handle_toggle_sbs(review: &mut Review) {
 }
 
 fn handle_ga(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+    if try_resolve_thread_at_cursor(review) {
+        return;
+    }
+
+    let Some(path) = review.current_file.clone() else {
         return;
     };
     let current_status = review
         .files
         .iter()
-        .find(|(p, _, _)| p == path)
+        .find(|(p, _, _)| *p == path)
         .map(|(_, _, rs)| *rs);
     let new_status = if current_status == Some(ReviewStatus::Approved) {
         ReviewStatus::Unreviewed
     } else {
         ReviewStatus::Approved
     };
-    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| p == path) {
+    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
         *rs = new_status;
     }
     if new_status == ReviewStatus::Approved {
-        let full = Path::new(&review.cwd).join(path);
+        let full = Path::new(&review.cwd).join(&path);
         let contents = std::fs::read_to_string(&full).unwrap_or_default();
         let hash = state::content_hash(&contents);
         review.file_content_hash.insert(path.clone(), hash);
+
+        let all_hashes: HashSet<String> = review
+            .current_hunks
+            .iter()
+            .map(|h| h.content_hash.clone())
+            .collect();
+        review.accepted_hunks.insert(path.clone(), all_hashes);
+
+        resolve_threads_for_file(review, &path);
+        select_file_impl(review, &review.current_file.clone().unwrap_or_default());
     } else {
-        review.file_content_hash.remove(path);
+        review.file_content_hash.remove(&path);
+        review.accepted_hunks.remove(&path);
+
+        select_file_impl(review, &path);
     }
-    let state_dir = review.config.state_dir();
-    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-    let mut review_state = state::ReviewState::default();
-    for (p, _, rs) in &review.files {
-        let ch = review.file_content_hash.get(p).cloned().unwrap_or_default();
-        review_state.files.insert(
-            p.clone(),
-            state::FileState {
-                status: *rs,
-                content_hash: ch,
-                updated_at: now_secs(),
-            },
-        );
-    }
-    state::save_review(&state_dir, &ws_hash, &review.ref_name, &review_state);
+    save_file_statuses(review);
     rerender_file_panel(review);
-    if review.config.review.fold_approved {
-        let _ = api::set_current_win(&review.diff_panel.win);
-        let _ = api::command("normal! zc");
-    }
 }
 
 fn handle_gx(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+    let Some(path) = review.current_file.clone() else {
         return;
     };
-    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| p == path) {
+    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
         *rs = ReviewStatus::NeedsChanges;
     }
-    let state_dir = review.config.state_dir();
-    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-    let mut review_state = state::ReviewState::default();
-    for (p, _, rs) in &review.files {
-        let ch = review.file_content_hash.get(p).cloned().unwrap_or_default();
-        review_state.files.insert(
-            p.clone(),
-            state::FileState {
-                status: *rs,
-                content_hash: ch,
-                updated_at: now_secs(),
-            },
-        );
-    }
-    state::save_review(&state_dir, &ws_hash, &review.ref_name, &review_state);
+    review.accepted_hunks.remove(&path);
+    save_file_statuses(review);
     rerender_file_panel(review);
+    select_file_impl(review, &path);
 }
 
 fn handle_gr(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+    let Some(path) = review.current_file.clone() else {
         return;
     };
-    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| p == path) {
+    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
         *rs = ReviewStatus::Unreviewed;
     }
-    review.file_content_hash.remove(path);
-    let state_dir = review.config.state_dir();
-    let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-    let mut review_state = state::ReviewState::default();
-    for (p, _, rs) in &review.files {
-        let ch = review.file_content_hash.get(p).cloned().unwrap_or_default();
-        review_state.files.insert(
-            p.clone(),
-            state::FileState {
-                status: *rs,
-                content_hash: ch,
-                updated_at: now_secs(),
-            },
-        );
-    }
-    state::save_review(&state_dir, &ws_hash, &review.ref_name, &review_state);
+    review.file_content_hash.remove(&path);
+    review.accepted_hunks.remove(&path);
+    save_file_statuses(review);
     rerender_file_panel(review);
+    select_file_impl(review, &path);
     if review.config.review.fold_approved {
         if let Some(h) = hunk_at_cursor(review) {
             let _ = api::set_current_win(&review.diff_panel.win);
@@ -1481,7 +1730,7 @@ fn hunk_at_cursor(review: &Review) -> Option<&Hunk> {
         .find(|h| line >= h.buf_start && line <= h.buf_end)
 }
 
-fn handle_gs(review: &mut Review) {
+pub fn show_summary(review: &mut Review) {
     let approved = review
         .files
         .iter()
@@ -1569,10 +1818,41 @@ fn handle_gs(review: &mut Review) {
     let _ = buf.set_keymap(Mode::Normal, "<Esc>", "", &opts);
 }
 
+fn try_resolve_thread_at_cursor(review: &mut Review) -> bool {
+    let (row, _) = match review.diff_panel.win.get_cursor().into_result() {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let buf_line = row.saturating_sub(1);
+    let tid = review
+        .thread_buf_lines
+        .iter()
+        .find(|(_, &l)| l == buf_line)
+        .map(|(id, _)| id.clone());
+    let Some(tid) = tid else { return false };
+    let Some(t) = review.threads.iter_mut().find(|t| t.id == tid) else {
+        return false;
+    };
+    if t.status == ThreadStatus::Open {
+        threads::resolve(t);
+    } else {
+        t.status = ThreadStatus::Open;
+    }
+    save_threads(review);
+    if let Some(path) = review.current_file.clone() {
+        select_file_impl(review, &path);
+    }
+    true
+}
+
 fn get_thread_at_cursor(review: &Review) -> Option<&threads::Thread> {
     let (row, _) = review.diff_panel.win.get_cursor().into_result().ok()?;
-    let line = row;
-    let tid = review.thread_buf_lines.iter().find(|(_, &l)| l == line)?.0;
+    let buf_line = row.saturating_sub(1);
+    let tid = review
+        .thread_buf_lines
+        .iter()
+        .find(|(_, &l)| l == buf_line)?
+        .0;
     review.threads.iter().find(|t| t.id == *tid)
 }
 
@@ -1729,9 +2009,9 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                             nvim_oxi::api::types::LogLevel::Warn,
                             &Dictionary::default(),
                         );
-                    }
-                    if threads::window_thread_id().as_deref() == Some(&window_tid) {
-                        let _ = threads::replace_last_agent_message(&msg);
+                        if threads::window_thread_id().as_deref() == Some(&window_tid) {
+                            let _ = threads::replace_last_agent_message(&msg);
+                        }
                     }
                     with_active(|r| {
                         if let Some(t) = r.threads.iter_mut().find(|t| t.id == tid) {
@@ -1922,56 +2202,59 @@ fn handle_reanchor(review: &mut Review) {
 }
 
 fn nav_next_thread(review: &mut Review) {
+    nav_thread_directed(review, true);
+}
+
+fn nav_prev_thread(review: &mut Review) {
+    nav_thread_directed(review, false);
+}
+
+fn nav_thread_directed(review: &mut Review, forward: bool) {
     let file_order: Vec<String> = review.files.iter().map(|(p, _, _)| p.clone()).collect();
-    let sorted = threads::sorted_global(&review.threads, &file_order);
+    let all_sorted = threads::sorted_global(&review.threads, &file_order);
+    let sorted: Vec<usize> = all_sorted
+        .into_iter()
+        .filter(|&i| {
+            review
+                .threads
+                .get(i)
+                .map_or(false, |t| t.status == ThreadStatus::Open)
+        })
+        .collect();
+
+    if sorted.is_empty() {
+        let _ = api::notify(
+            "[arbiter] no open threads",
+            nvim_oxi::api::types::LogLevel::Info,
+            &Dictionary::default(),
+        );
+        return;
+    }
+
     let (row, _) = review
         .diff_panel
         .win
         .get_cursor()
         .into_result()
         .unwrap_or((1, 0));
-    let line = row;
+    let buf_line = row.saturating_sub(1);
     let current = review
         .thread_buf_lines
         .iter()
-        .find(|(_, &l)| l == line)
+        .find(|(_, &l)| l == buf_line)
         .and_then(|(tid, _)| review.threads.iter().position(|t| t.id == *tid));
-    let next_idx = threads::next_thread(&sorted, current);
-    if let Some(idx) = next_idx {
+
+    let target_idx = if forward {
+        threads::next_thread(&sorted, current)
+    } else {
+        threads::prev_thread(&sorted, current)
+    };
+
+    if let Some(idx) = target_idx {
         if let Some(t) = review.threads.get(idx) {
             let target_file = t.file.clone();
             let target_id = t.id.clone();
             if target_file != review.current_file.as_deref().unwrap_or_default() {
-                select_file_impl(review, &target_file);
-            }
-            if let Some(&target_line) = review.thread_buf_lines.get(&target_id) {
-                let _ = review.diff_panel.win.set_cursor(target_line + 1, 0);
-            }
-        }
-    }
-}
-
-fn nav_prev_thread(review: &mut Review) {
-    let file_order: Vec<String> = review.files.iter().map(|(p, _, _)| p.clone()).collect();
-    let sorted = threads::sorted_global(&review.threads, &file_order);
-    let (row, _) = review
-        .diff_panel
-        .win
-        .get_cursor()
-        .into_result()
-        .unwrap_or((1, 0));
-    let line = row;
-    let current = review
-        .thread_buf_lines
-        .iter()
-        .find(|(_, &l)| l == line)
-        .and_then(|(tid, _)| review.threads.iter().position(|t| t.id == *tid));
-    let prev_idx = threads::prev_thread(&sorted, current);
-    if let Some(idx) = prev_idx {
-        if let Some(t) = review.threads.get(idx) {
-            let target_file = t.file.clone();
-            let target_id = t.id.clone();
-            if target_file.as_str() != review.current_file.as_deref().unwrap_or_default() {
                 select_file_impl(review, &target_file);
             }
             if let Some(&target_line) = review.thread_buf_lines.get(&target_id) {
@@ -1996,20 +2279,10 @@ pub fn close() {
     let ref_name = review.ref_name.clone();
 
     let mut review_state = state::ReviewState::default();
-    for (path, _, rs) in &review.files {
-        let content_hash = review
-            .file_content_hash
-            .get(path)
-            .cloned()
-            .unwrap_or_default();
-        review_state.files.insert(
-            path.clone(),
-            state::FileState {
-                status: *rs,
-                content_hash,
-                updated_at: now_secs(),
-            },
-        );
+    for (p, _, rs) in &review.files {
+        review_state
+            .files
+            .insert(p.clone(), file_state_for(&review, p, *rs));
     }
     state::save_review(&state_dir, &ws_hash, &ref_name, &review_state);
     state::save_threads(&state_dir, &ws_hash, &ref_name, &review.threads);
@@ -2018,8 +2291,12 @@ pub fn close() {
         let _ = diff::close_side_by_side(&sbs.old_buf, &sbs.old_win, &sbs.new_buf, &sbs.new_win);
     }
 
+    let diff_nr = review.diff_panel.buf.handle();
+    let file_nr = review.file_panel.buf.handle();
+
     let _ = api::set_current_tabpage(&review.tabpage);
     let _ = api::command("tabclose");
+    let _ = api::command(&format!("silent! bwipeout! {diff_nr} {file_nr}"));
 }
 
 fn place_thread_signs(review: &Review) {
@@ -2204,7 +2481,25 @@ fn refresh_file_with_diff(
         .collect();
 
     let new_hunks = diff::parse_hunks(diff_text);
+    let new_hashes: std::collections::HashSet<String> =
+        new_hunks.iter().map(|h| h.content_hash.clone()).collect();
     let changed_raw = diff::detect_hunk_changes(&old_hashes, &new_hunks);
+
+    let stale_hashes: Vec<String> = old_hashes
+        .iter()
+        .filter(|h| !new_hashes.contains(*h))
+        .cloned()
+        .collect();
+    if !stale_hashes.is_empty() {
+        if let Some(set) = review.accepted_hunks.get_mut(path) {
+            for h in &stale_hashes {
+                set.remove(h);
+            }
+            if set.is_empty() {
+                review.accepted_hunks.remove(path);
+            }
+        }
+    }
 
     if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| p == path) {
         if *rs == ReviewStatus::Approved {
@@ -2244,6 +2539,9 @@ fn refresh_file_with_diff(
     let new_hunk_buf_starts: std::collections::HashSet<usize> =
         changed_raw.iter().map(|&raw| raw + offset).collect();
 
+    review.current_diff_text = diff_text.to_string();
+
+    let file_accepted = review.accepted_hunks.get(path).cloned().unwrap_or_default();
     if let Ok((hunks, thread_buf_lines)) = diff::render(
         &mut review.diff_panel.buf,
         diff_text,
@@ -2251,6 +2549,7 @@ fn refresh_file_with_diff(
         path,
         review.show_resolved,
         Some(&new_hunk_buf_starts),
+        &file_accepted,
     ) {
         review.current_hunks = hunks.clone();
         review.thread_buf_lines = thread_buf_lines;
@@ -2260,12 +2559,18 @@ fn refresh_file_with_diff(
             .find(|(p, _, _)| *p == path)
             .map(|(_, _, rs)| *rs == ReviewStatus::Approved)
             .unwrap_or(false);
+        let accepted_buf_starts: HashSet<usize> = hunks
+            .iter()
+            .filter(|h| file_accepted.contains(&h.content_hash))
+            .map(|h| h.buf_start)
+            .collect();
         if !hunks.is_empty() {
             let _ = diff::set_hunk_folds(
                 &mut review.diff_panel.buf,
                 &review.diff_panel.win,
                 &hunks,
                 review.config.review.fold_approved && file_approved,
+                &accepted_buf_starts,
             );
         }
     }
@@ -2276,15 +2581,9 @@ fn refresh_file_with_diff(
     let ws_hash = state::workspace_hash(Path::new(&review.cwd));
     let mut review_state = state::ReviewState::default();
     for (p, _, rs) in &review.files {
-        let ch = review.file_content_hash.get(p).cloned().unwrap_or_default();
-        review_state.files.insert(
-            p.clone(),
-            state::FileState {
-                status: *rs,
-                content_hash: ch,
-                updated_at: now_secs(),
-            },
-        );
+        review_state
+            .files
+            .insert(p.clone(), file_state_for(review, p, *rs));
     }
     state::save_review(&state_dir, &ws_hash, &review.ref_name, &review_state);
     state::save_threads(&state_dir, &ws_hash, &review.ref_name, &review.threads);
@@ -2372,15 +2671,9 @@ pub fn refresh_file_list(review: &mut Review) {
                         rerender_file_panel(r);
                         let mut review_state = state::ReviewState::default();
                         for (p, _, rs) in &r.files {
-                            let ch = r.file_content_hash.get(p).cloned().unwrap_or_default();
-                            review_state.files.insert(
-                                p.clone(),
-                                state::FileState {
-                                    status: *rs,
-                                    content_hash: ch,
-                                    updated_at: now_secs(),
-                                },
-                            );
+                            review_state
+                                .files
+                                .insert(p.clone(), file_state_for(r, p, *rs));
                         }
                         state::save_review(&state_dir, &ws_hash, &ref_name, &review_state);
                     });
@@ -2448,11 +2741,13 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
         let full_path = Path::new(&review.cwd).join(path);
         let contents = std::fs::read_to_string(&full_path).unwrap_or_default();
         let diff_text = diff::synthesize_untracked(&contents, path);
+        review.current_diff_text = diff_text.clone();
         let file_threads: Vec<threads::Thread> = threads::for_file(&review.threads, path)
             .into_iter()
             .cloned()
             .collect();
         let summaries = threads::to_summaries(&file_threads);
+        let file_accepted = review.accepted_hunks.get(path).cloned().unwrap_or_default();
         if let Ok((hunks, thread_buf_lines)) = diff::render(
             &mut review.diff_panel.buf,
             &diff_text,
@@ -2460,6 +2755,7 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             path,
             review.show_resolved,
             None,
+            &file_accepted,
         ) {
             review.current_hunks = hunks.clone();
             review.thread_buf_lines = thread_buf_lines;
@@ -2469,12 +2765,18 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
                 .find(|(p, _, _)| *p == path)
                 .map(|(_, _, rs)| *rs == ReviewStatus::Approved)
                 .unwrap_or(false);
+            let accepted_buf_starts: HashSet<usize> = hunks
+                .iter()
+                .filter(|h| file_accepted.contains(&h.content_hash))
+                .map(|h| h.buf_start)
+                .collect();
             if !hunks.is_empty() {
                 let _ = diff::set_hunk_folds(
                     &mut review.diff_panel.buf,
                     &review.diff_panel.win,
                     &hunks,
                     review.config.review.fold_approved && file_approved,
+                    &accepted_buf_starts,
                 );
             }
         }
@@ -2493,6 +2795,11 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
     let path_clone = path.clone();
     let show_resolved = review.show_resolved;
     let mut diff_buf = review.diff_panel.buf.clone();
+    let file_accepted: HashSet<String> = review
+        .accepted_hunks
+        .get(&path)
+        .cloned()
+        .unwrap_or_default();
     let threads_for_file: Vec<threads::Thread> = threads::for_file(&review.threads, &path)
         .into_iter()
         .cloned()
@@ -2512,12 +2819,15 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             &path_clone,
             show_resolved,
             None,
+            &file_accepted,
         ) {
+            let diff_text_clone = diff_text.clone();
             with_active(|r| {
                 if !r.diff_panel.win.is_valid() {
                     return;
                 }
                 r.current_hunks = hunks.clone();
+                r.current_diff_text = diff_text_clone;
                 r.thread_buf_lines = thread_buf_lines;
                 poll::set_target(Some(&path_clone));
                 let file_approved = r
@@ -2526,12 +2836,18 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
                     .find(|(p, _, _)| *p == path_clone)
                     .map(|(_, _, rs)| *rs == ReviewStatus::Approved)
                     .unwrap_or(false);
+                let accepted_buf_starts: HashSet<usize> = hunks
+                    .iter()
+                    .filter(|h| file_accepted.contains(&h.content_hash))
+                    .map(|h| h.buf_start)
+                    .collect();
                 if !hunks.is_empty() {
                     let _ = diff::set_hunk_folds(
                         &mut r.diff_panel.buf,
                         &r.diff_panel.win,
                         &hunks,
                         r.config.review.fold_approved && file_approved,
+                        &accepted_buf_starts,
                     );
                 }
                 update_diff_winbar(r, &path_clone);
@@ -2572,6 +2888,7 @@ mod tests {
                 status: ReviewStatus::Approved,
                 content_hash: String::new(),
                 updated_at: 0,
+                accepted_hunks: Vec::new(),
             },
         );
         let out = parse_diff_names("M\ta.rs\n", &state);

@@ -1,6 +1,6 @@
 //! Highlight group registration.
 //!
-//! Registers all 13 custom highlight groups via `api::set_hl`.
+//! Registers custom highlight groups via `api::set_hl`.
 //! Each group links to a built-in group for colorscheme inheritance.
 
 use nvim_oxi::api::opts::SetHighlightOpts;
@@ -11,7 +11,7 @@ use nvim_oxi::api::{self};
 /// Each group links to a built-in Neovim group so they inherit
 /// the user's colorscheme. Users can override with `nvim_set_hl()`.
 pub fn setup() -> nvim_oxi::Result<()> {
-    let groups: [(&str, &str); 13] = [
+    let groups: [(&str, &str); 14] = [
         ("ArbiterDiffAdd", "DiffAdd"),
         ("ArbiterDiffDelete", "DiffDelete"),
         ("ArbiterDiffChange", "DiffChange"),
@@ -23,6 +23,7 @@ pub fn setup() -> nvim_oxi::Result<()> {
         ("ArbiterStatusChanges", "DiagnosticError"),
         ("ArbiterStatusPending", "NonText"),
         ("ArbiterHunkNew", "DiffAdd"),
+        ("ArbiterHunkAccepted", "Comment"),
         ("ArbiterIndicatorUser", "DiagnosticHint"),
         ("ArbiterIndicatorAgent", "DiagnosticWarn"),
     ];
