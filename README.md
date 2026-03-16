@@ -28,6 +28,7 @@ Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a 
 - **Session persistence** - Review state, threads, and session history saved to disk
 - **Per-workspace config** - Override the default comparison branch per repository
 - **Backend shim** - Transparent support for both Cursor CLI and Claude Code CLI
+- **Process cleanup** - Agent CLI processes are killed when Neovim exits; no orphaned processes
 
 ## Workflow
 
@@ -37,7 +38,7 @@ Arbiter is designed for a specific loop: an AI agent writes code, you review it,
 
 1. **The agent works.** You give Cursor or Claude Code a task. It writes code across multiple files.
 
-2. **You open the workbench.** `:Arbiter main` opens a dedicated review tabpage. The left panel shows changed files (like a PR file list). The right panel shows the diff. Only changes introduced by your branch appear - arbiter uses `git merge-base` so the diff matches what a GitHub/GitLab PR would show.
+2. **You open the workbench.** `:Arbiter main` opens a dedicated review tabpage. The left panel shows changed files (like a PR file list). The right panel shows the diff, starting on the first file you haven't approved yet. Only changes introduced by your branch appear - arbiter uses `git merge-base` so the diff matches what a GitHub/GitLab PR would show.
 
 3. **You review file by file.** Select files in the left panel with `<CR>`. Jump between hunks with `]c`/`[c`. Collapse directories you don't care about. Use `<Leader>s` for a side-by-side view when you need it.
 
@@ -92,9 +93,9 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 ### lazy.nvim
 
 ```lua
-{
+return {
   "tannaurus/nvim-arbiter",
-  tag = "v0.1.0",  -- pin to a release tag
+  tag = "v0.0.2", -- pin to a release tag
   build = function()
     require("arbiter.build").download_or_build_binary()
   end,
@@ -369,6 +370,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | Command | Description |
 |---------|-------------|
 | `:ArbiterRef [branch]` | Change the comparison branch on the fly. No argument clears the base. |
+| `:ArbiterActiveThread` | Open the thread window for the agent that is currently thinking. |
 | `:ArbiterSelfReview` | Run agent self-review on the current diff. Creates agent threads. |
 | `:ArbiterRefresh` | Refresh the file list and current file diff. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
