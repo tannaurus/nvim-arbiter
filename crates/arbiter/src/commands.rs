@@ -496,6 +496,16 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
     )?;
 
     api::create_user_command(
+        "ArbiterActiveThread",
+        |_args: CommandArgs| {
+            with_review_cmd(review::open_active_thread);
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
+    api::create_user_command(
         "ArbiterOpenThread",
         |args: CommandArgs| {
             let file = args.fargs.first().cloned().unwrap_or_default();

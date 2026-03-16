@@ -120,6 +120,11 @@ pub(super) fn is_busy() -> bool {
     PROCESSING.load(Ordering::SeqCst) || !QUEUE.lock().expect("queue lock").is_empty()
 }
 
+/// Returns the tag of the currently in-flight request, if any.
+pub(super) fn inflight_tag() -> Option<String> {
+    INFLIGHT_TAG.lock().expect("inflight_tag lock").clone()
+}
+
 /// Cancels all pending items and causes in-flight callbacks to no-op.
 pub(super) fn cancel_all() {
     GENERATION.fetch_add(1, Ordering::SeqCst);

@@ -10,7 +10,9 @@ mod queue;
 
 use crate::types::{BackendOp, BackendOpts, OnComplete, OnStream};
 pub use adapter::Adapter;
-use std::sync::Arc;
+use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Minimal config for backend setup. Workspace defaults to cwd at setup time.
 #[derive(Debug, Clone)]
@@ -96,8 +98,64 @@ pub fn cancel_tagged(tag: &str) {
     queue::cancel_tagged(tag)
 }
 
-static MISSING_BINARY_NOTIFIED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// Returns the tag (thread ID) of the currently in-flight request, if any.
+pub fn inflight_tag() -> Option<String> {
+    queue::inflight_tag()
+}
+
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+static CHILDREN: Mutex<Vec<Arc<Mutex<Child>>>> = Mutex::new(Vec::new());
+
+/// Shared handle to a spawned child process.
+///
+/// Ownership is shared between the adapter thread (reads stdout, waits
+/// for exit) and the shutdown path (kills the process on `VimLeavePre`).
+pub(crate) type SharedChild = Arc<Mutex<Child>>;
+
+/// Returns true if shutdown has been requested.
+pub(crate) fn is_shutdown() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn reset_shutdown() {
+    SHUTDOWN.store(false, Ordering::SeqCst);
+    CHILDREN.lock().expect("children lock").clear();
+}
+
+/// Registers a child process handle for cleanup on shutdown.
+pub(crate) fn track_child(handle: &SharedChild) {
+    CHILDREN
+        .lock()
+        .expect("children lock")
+        .push(Arc::clone(handle));
+}
+
+/// Removes a child handle after it exits normally.
+pub(crate) fn untrack_child(handle: &SharedChild) {
+    CHILDREN
+        .lock()
+        .expect("children lock")
+        .retain(|h| !Arc::ptr_eq(h, handle));
+}
+
+/// Cancels all pending work and kills all spawned agent processes.
+///
+/// Called from `VimLeavePre` to ensure no orphaned CLI processes survive
+/// after Neovim exits. Killing the child closes its stdout pipe, which
+/// unblocks any `BufReader::lines()` loop in the adapter thread.
+pub fn shutdown() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    cancel_all();
+    let handles: Vec<SharedChild> = CHILDREN.lock().expect("children lock").drain(..).collect();
+    for h in handles {
+        let child = &mut *h.lock().expect("child lock");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+static MISSING_BINARY_NOTIFIED: AtomicBool = AtomicBool::new(false);
 
 /// Notifies once at ERROR when the backend error indicates a missing CLI binary.
 ///
@@ -293,6 +351,12 @@ mod tests {
     use crate::types::BackendResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Serializes tests that touch global queue state (ADAPTER, QUEUE,
+    /// PROCESSING, GENERATION). Without this, concurrent tests can increment
+    /// GENERATION via `cancel_all`, causing another test's guarded callbacks
+    /// to no-op on the generation check.
+    static QUEUE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     struct MockAdapter {
         responses: std::sync::Mutex<std::collections::VecDeque<BackendResult>>,
         call_count: AtomicUsize,
@@ -326,6 +390,7 @@ mod tests {
 
     #[test]
     fn queue_fifo_order() {
+        let _lock = QUEUE_LOCK.lock().expect("test lock");
         setup_with_adapter(Arc::new(MockAdapter::new(vec![
             BackendResult {
                 text: "a".to_string(),
@@ -401,8 +466,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "global queue state shared across tests causes non-deterministic hangs"]
     fn is_busy_returns_true_while_processing() {
+        let _lock = QUEUE_LOCK.lock().expect("test lock");
         let adapter = Arc::new(MockAdapter::new(vec![BackendResult {
             text: String::new(),
             session_id: String::new(),
@@ -449,6 +514,7 @@ mod tests {
 
     #[test]
     fn thread_reply_uses_resume() {
+        let _lock = QUEUE_LOCK.lock().expect("test lock");
         let opts_cell = Arc::new(std::sync::Mutex::new(None));
         let opts_cell_clone = Arc::clone(&opts_cell);
 
@@ -467,6 +533,7 @@ mod tests {
 
     #[test]
     fn self_review_uses_new_session_no_stream() {
+        let _lock = QUEUE_LOCK.lock().expect("test lock");
         let opts_cell = Arc::new(std::sync::Mutex::new(None));
         let opts_cell_clone = Arc::clone(&opts_cell);
 
@@ -547,6 +614,7 @@ mod tests {
 
     #[test]
     fn cancel_all_clears_pending() {
+        let _lock = QUEUE_LOCK.lock().expect("test lock");
         setup_with_adapter(Arc::new(MockAdapter::new(vec![])));
 
         for i in 0..3 {
@@ -578,5 +646,136 @@ mod tests {
         assert_eq!(t[0].file, "file.rs");
         assert_eq!(t[0].line, 1);
         assert_eq!(t[0].message, "message with | pipe");
+    }
+
+    static CHILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn spawn_sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("sleep should be available")
+    }
+
+    fn kill_handle(handle: &SharedChild) {
+        let child = &mut *handle.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn children_count() -> usize {
+        CHILDREN.lock().expect("lock").len()
+    }
+
+    #[test]
+    fn track_and_untrack_child() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        let handle: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        track_child(&handle);
+        assert_eq!(children_count(), 1);
+
+        untrack_child(&handle);
+        assert_eq!(children_count(), 0);
+
+        kill_handle(&handle);
+    }
+
+    #[test]
+    fn untrack_only_removes_matching_handle() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        let h1: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        let h2: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        track_child(&h1);
+        track_child(&h2);
+        assert_eq!(children_count(), 2);
+
+        untrack_child(&h1);
+        assert_eq!(children_count(), 1);
+
+        untrack_child(&h2);
+        assert_eq!(children_count(), 0);
+
+        kill_handle(&h1);
+        kill_handle(&h2);
+    }
+
+    #[test]
+    fn untrack_nonexistent_handle_is_noop() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        let tracked: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        let untracked: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        track_child(&tracked);
+        assert_eq!(children_count(), 1);
+
+        untrack_child(&untracked);
+        assert_eq!(children_count(), 1);
+
+        kill_handle(&tracked);
+        kill_handle(&untracked);
+    }
+
+    #[test]
+    fn shutdown_kills_tracked_children() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        let h1: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        let h2: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        track_child(&h1);
+        track_child(&h2);
+
+        shutdown();
+
+        assert!(is_shutdown());
+        assert_eq!(children_count(), 0);
+
+        for h in [&h1, &h2] {
+            let exited = h.lock().expect("lock").try_wait().ok().flatten().is_some();
+            assert!(exited, "child should have exited after shutdown");
+        }
+    }
+
+    #[test]
+    fn shutdown_with_no_children_is_noop() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        assert_eq!(children_count(), 0);
+        shutdown();
+        assert!(is_shutdown());
+        assert_eq!(children_count(), 0);
+    }
+
+    #[test]
+    fn shutdown_is_idempotent() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        let h: SharedChild = Arc::new(Mutex::new(spawn_sleeper()));
+        track_child(&h);
+
+        shutdown();
+        assert!(is_shutdown());
+        assert_eq!(children_count(), 0);
+
+        shutdown();
+        assert!(is_shutdown());
+        assert_eq!(children_count(), 0);
+    }
+
+    #[test]
+    fn is_shutdown_lifecycle() {
+        let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_shutdown();
+
+        assert!(!is_shutdown());
+        shutdown();
+        assert!(is_shutdown());
     }
 }

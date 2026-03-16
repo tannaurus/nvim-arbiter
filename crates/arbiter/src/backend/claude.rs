@@ -101,7 +101,7 @@ impl Adapter for ClaudeAdapter {
             }
 
             if opts.stream {
-                let mut child = match cmd.spawn() {
+                let child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => {
                         let err = format!("claude binary not found on PATH: {e}");
@@ -116,12 +116,20 @@ impl Adapter for ClaudeAdapter {
                     }
                 };
 
+                let handle: crate::backend::SharedChild =
+                    std::sync::Arc::new(std::sync::Mutex::new(child));
+                crate::backend::track_child(&handle);
+
                 let mut text = String::new();
                 let mut session_id = String::new();
 
-                if let Some(pipe) = child.stdout.take() {
+                let pipe = handle.lock().expect("child lock").stdout.take();
+                if let Some(pipe) = pipe {
                     let reader = BufReader::new(pipe);
                     for line in reader.lines().map_while(Result::ok) {
+                        if crate::backend::is_shutdown() {
+                            break;
+                        }
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
                             continue;
@@ -148,16 +156,25 @@ impl Adapter for ClaudeAdapter {
                     }
                 }
 
-                let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut pipe| {
-                        let mut s = String::new();
-                        pipe.read_to_string(&mut s).ok();
-                        s
-                    })
-                    .unwrap_or_default();
+                let (exit, stderr) = {
+                    let child = &mut *handle.lock().expect("child lock");
+                    let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .map(|mut pipe| {
+                            let mut s = String::new();
+                            pipe.read_to_string(&mut s).ok();
+                            s
+                        })
+                        .unwrap_or_default();
+                    (exit, stderr)
+                };
+                crate::backend::untrack_child(&handle);
+
+                if crate::backend::is_shutdown() {
+                    return;
+                }
 
                 let result = if exit != 0 {
                     BackendResult {
@@ -194,8 +211,8 @@ impl Adapter for ClaudeAdapter {
                     crate::dispatch::schedule(move || (callback)(result));
                 }
             } else {
-                let output = match cmd.output() {
-                    Ok(o) => o,
+                let child = match cmd.spawn() {
+                    Ok(c) => c,
                     Err(e) => {
                         let err = format!("claude binary not found on PATH: {e}");
                         crate::dispatch::schedule(move || {
@@ -209,13 +226,32 @@ impl Adapter for ClaudeAdapter {
                     }
                 };
 
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit = output.status.code().unwrap_or(-1);
+                let handle: crate::backend::SharedChild =
+                    std::sync::Arc::new(std::sync::Mutex::new(child));
+                crate::backend::track_child(&handle);
+
+                let (exit, stdout, stderr) = {
+                    let child = &mut *handle.lock().expect("child lock");
+                    let mut stdout_buf = String::new();
+                    let mut stderr_buf = String::new();
+                    if let Some(ref mut pipe) = child.stdout {
+                        let _ = pipe.read_to_string(&mut stdout_buf);
+                    }
+                    if let Some(ref mut pipe) = child.stderr {
+                        let _ = pipe.read_to_string(&mut stderr_buf);
+                    }
+                    let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                    (exit, stdout_buf, stderr_buf)
+                };
+                crate::backend::untrack_child(&handle);
+
+                if crate::backend::is_shutdown() {
+                    return;
+                }
 
                 let result = if exit != 0 {
                     BackendResult {
-                        text: stdout.to_string(),
+                        text: stdout.clone(),
                         session_id: String::new(),
                         error: Some(format!(
                             "exit code {}: {}",
@@ -227,7 +263,7 @@ impl Adapter for ClaudeAdapter {
                     match parse_json_response(&stdout) {
                         Ok(r) => r,
                         Err(e) => BackendResult {
-                            text: stdout.to_string(),
+                            text: stdout,
                             session_id: String::new(),
                             error: Some(e),
                         },

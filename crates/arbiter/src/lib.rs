@@ -21,6 +21,7 @@ pub mod state;
 pub mod threads;
 pub mod types;
 
+use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::types::LogLevel;
 use nvim_oxi::api::{self};
 use nvim_oxi::{Dictionary, Object};
@@ -61,6 +62,15 @@ pub fn setup(opts: Dictionary) -> nvim_oxi::Result<()> {
     if config.inline_indicators {
         inline::setup()?;
     }
+    api::create_autocmd(
+        ["VimLeavePre"],
+        &CreateAutocmdOpts::builder()
+            .callback(|_| {
+                backend::shutdown();
+                Ok::<bool, nvim_oxi::Error>(false)
+            })
+            .build(),
+    )?;
     let _ = api::notify("arbiter loaded", LogLevel::Info, &Dictionary::default());
     Ok(())
 }

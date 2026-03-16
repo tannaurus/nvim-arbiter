@@ -82,7 +82,7 @@ impl Adapter for CursorAdapter {
             }
 
             if opts.stream {
-                let mut child = match cmd.spawn() {
+                let child = match cmd.spawn() {
                     Ok(c) => c,
                     Err(e) => {
                         let err = format!("agent binary not found on PATH: {e}");
@@ -97,13 +97,21 @@ impl Adapter for CursorAdapter {
                     }
                 };
 
+                let handle: crate::backend::SharedChild =
+                    std::sync::Arc::new(std::sync::Mutex::new(child));
+                crate::backend::track_child(&handle);
+
                 let mut text = String::new();
                 let mut session_id = String::new();
-                let mut prev_combined = String::new();
+                let mut streamed = String::new();
 
-                if let Some(pipe) = child.stdout.take() {
+                let pipe = handle.lock().expect("child lock").stdout.take();
+                if let Some(pipe) = pipe {
                     let reader = BufReader::new(pipe);
                     for line in reader.lines().map_while(Result::ok) {
+                        if crate::backend::is_shutdown() {
+                            break;
+                        }
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
                             continue;
@@ -125,18 +133,24 @@ impl Adapter for CursorAdapter {
                                     .filter_map(|c| c.text)
                                     .collect::<Vec<_>>()
                                     .join("\n\n");
-                                if combined.len() > prev_combined.len()
-                                    && combined.starts_with(&prev_combined)
+                                if combined.starts_with(&streamed)
+                                    && combined.len() > streamed.len()
                                 {
-                                    let delta = &combined[prev_combined.len()..];
+                                    let delta = combined[streamed.len()..].to_string();
                                     if let Some(ref cb) = on_stream {
                                         let cb = Arc::clone(cb);
-                                        let d = delta.to_string();
-                                        crate::dispatch::schedule(move || cb(&d));
+                                        crate::dispatch::schedule(move || cb(&delta));
                                     }
+                                    streamed = combined.clone();
+                                } else if !combined.is_empty() && combined != streamed {
+                                    let delta = combined.clone();
+                                    if let Some(ref cb) = on_stream {
+                                        let cb = Arc::clone(cb);
+                                        crate::dispatch::schedule(move || cb(&delta));
+                                    }
+                                    streamed.push_str(&combined);
                                 }
                                 if !combined.is_empty() {
-                                    prev_combined = combined.clone();
                                     text = combined;
                                 }
                             }
@@ -152,16 +166,25 @@ impl Adapter for CursorAdapter {
                     }
                 }
 
-                let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
-                let stderr = child
-                    .stderr
-                    .take()
-                    .map(|mut pipe| {
-                        let mut s = String::new();
-                        pipe.read_to_string(&mut s).ok();
-                        s
-                    })
-                    .unwrap_or_default();
+                let (exit, stderr) = {
+                    let child = &mut *handle.lock().expect("child lock");
+                    let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .map(|mut pipe| {
+                            let mut s = String::new();
+                            pipe.read_to_string(&mut s).ok();
+                            s
+                        })
+                        .unwrap_or_default();
+                    (exit, stderr)
+                };
+                crate::backend::untrack_child(&handle);
+
+                if crate::backend::is_shutdown() {
+                    return;
+                }
 
                 let result = if exit != 0 {
                     BackendResult {
@@ -198,8 +221,8 @@ impl Adapter for CursorAdapter {
                     crate::dispatch::schedule(move || (callback)(result));
                 }
             } else {
-                let output = match cmd.output() {
-                    Ok(o) => o,
+                let child = match cmd.spawn() {
+                    Ok(c) => c,
                     Err(e) => {
                         let err = format!("agent binary not found on PATH: {e}");
                         crate::dispatch::schedule(move || {
@@ -213,13 +236,32 @@ impl Adapter for CursorAdapter {
                     }
                 };
 
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit = output.status.code().unwrap_or(-1);
+                let handle: crate::backend::SharedChild =
+                    std::sync::Arc::new(std::sync::Mutex::new(child));
+                crate::backend::track_child(&handle);
+
+                let (exit, stdout, stderr) = {
+                    let child = &mut *handle.lock().expect("child lock");
+                    let mut stdout_buf = String::new();
+                    let mut stderr_buf = String::new();
+                    if let Some(ref mut pipe) = child.stdout {
+                        let _ = pipe.read_to_string(&mut stdout_buf);
+                    }
+                    if let Some(ref mut pipe) = child.stderr {
+                        let _ = pipe.read_to_string(&mut stderr_buf);
+                    }
+                    let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+                    (exit, stdout_buf, stderr_buf)
+                };
+                crate::backend::untrack_child(&handle);
+
+                if crate::backend::is_shutdown() {
+                    return;
+                }
 
                 let result = if exit != 0 {
                     BackendResult {
-                        text: stdout.to_string(),
+                        text: stdout.clone(),
                         session_id: String::new(),
                         error: Some(format!(
                             "exit code {}: {}",
@@ -231,7 +273,7 @@ impl Adapter for CursorAdapter {
                     match parse_json_response(&stdout) {
                         Ok(r) => r,
                         Err(e) => BackendResult {
-                            text: stdout.to_string(),
+                            text: stdout,
                             session_id: String::new(),
                             error: Some(e),
                         },
@@ -270,6 +312,7 @@ struct StreamEvent {
 
 #[derive(Debug, serde::Deserialize)]
 struct StreamMessage {
+    #[serde(default)]
     content: Vec<StreamContent>,
 }
 
@@ -492,5 +535,147 @@ mod tests {
         assert_eq!(ev.kind, "system");
         assert!(ev.message.is_none());
         assert!(ev.result.is_none());
+    }
+
+    #[test]
+    fn stream_event_missing_content_defaults_empty() {
+        let j = r#"{"type":"assistant","message":{"role":"assistant"},"session_id":"s1"}"#;
+        let ev: StreamEvent = serde_json::from_str(j).unwrap();
+        assert_eq!(ev.kind, "assistant");
+        let texts: Vec<String> = ev
+            .message
+            .into_iter()
+            .flat_map(|m| m.content)
+            .filter_map(|c| c.text)
+            .collect();
+        assert!(texts.is_empty());
+    }
+
+    /// Spawns the real `agent` CLI with streaming, captures every delta our
+    /// parsing logic produces, and asserts that concatenating them reproduces
+    /// the final cumulative text exactly. Run with:
+    ///
+    /// ```sh
+    /// cargo test -p arbiter streaming_deltas_match -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires `agent` binary on PATH and valid auth"]
+    fn streaming_deltas_match_final_text() {
+        use std::process::{Command, Stdio};
+
+        let workspace = std::env::var("ARBITER_TEST_WORKSPACE").unwrap_or_else(|_| ".".to_string());
+
+        let mut child = Command::new("agent")
+            .args([
+                "-p",
+                "--trust",
+                "--approve-mcps",
+                "Respond with exactly two paragraphs. First: 'Hello from arbiter.' \
+                 Second: 'Streaming works.'",
+                "--output-format",
+                "stream-json",
+                "--stream-partial-output",
+                "--mode",
+                "ask",
+                "--workspace",
+                &workspace,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("agent binary must be on PATH");
+
+        let mut deltas: Vec<String> = Vec::new();
+        let mut streamed = String::new();
+        let mut final_text = String::new();
+        let mut result_text: Option<String> = None;
+        let mut event_count = 0usize;
+        let mut skipped_lines = 0usize;
+
+        if let Some(pipe) = child.stdout.take() {
+            let reader = BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let Ok(ev) = serde_json::from_str::<StreamEvent>(trimmed) else {
+                    skipped_lines += 1;
+                    eprintln!("[skip] {trimmed}");
+                    continue;
+                };
+                event_count += 1;
+                match ev.kind.as_str() {
+                    "assistant" => {
+                        let combined: String = ev
+                            .message
+                            .into_iter()
+                            .flat_map(|m| m.content)
+                            .filter_map(|c| c.text)
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if combined.starts_with(&streamed) && combined.len() > streamed.len() {
+                            let d = combined[streamed.len()..].to_string();
+                            eprintln!("[delta:cumulative] {:?}", d);
+                            deltas.push(d);
+                            streamed = combined.clone();
+                        } else if !combined.is_empty() && combined != streamed {
+                            eprintln!("[delta:incremental] {:?}", combined);
+                            deltas.push(combined.clone());
+                            streamed.push_str(&combined);
+                        }
+                        if !combined.is_empty() {
+                            final_text = combined;
+                        }
+                    }
+                    "result" => {
+                        result_text = ev.result.clone();
+                    }
+                    other => {
+                        eprintln!("[event] type={other}");
+                    }
+                }
+            }
+        }
+
+        let exit = child.wait().expect("wait for agent");
+        let stderr = child
+            .stderr
+            .take()
+            .map(|mut p| {
+                let mut s = String::new();
+                p.read_to_string(&mut s).ok();
+                s
+            })
+            .unwrap_or_default();
+
+        eprintln!("\n--- summary ---");
+        eprintln!("events parsed : {event_count}");
+        eprintln!("lines skipped : {skipped_lines}");
+        eprintln!("deltas emitted: {}", deltas.len());
+        eprintln!("exit code     : {:?}", exit.code());
+        if !stderr.trim().is_empty() {
+            eprintln!("stderr        : {}", stderr.trim());
+        }
+
+        assert!(exit.success(), "agent exited with {exit}");
+        assert!(!final_text.is_empty(), "no text received from agent");
+
+        let streamed = deltas.join("");
+
+        eprintln!("\n--- streamed (concatenated deltas) ---");
+        eprintln!("{streamed}");
+        eprintln!("\n--- final_text (last cumulative) ---");
+        eprintln!("{final_text}");
+
+        if let Some(ref rt) = result_text {
+            eprintln!("\n--- result event text ---");
+            eprintln!("{rt}");
+        }
+
+        assert_eq!(
+            streamed, final_text,
+            "concatenated streaming deltas must equal final cumulative text"
+        );
     }
 }

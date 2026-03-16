@@ -1458,6 +1458,34 @@ fn open_thread_panel(review: &Review, t: &threads::Thread) {
     place_thread_anchor(review, t.line);
 }
 
+pub fn open_active_thread(review: &mut Review) {
+    let Some(tid) = backend::inflight_tag() else {
+        let _ = api::notify(
+            "[arbiter] no active thread",
+            nvim_oxi::api::types::LogLevel::Info,
+            &Dictionary::default(),
+        );
+        return;
+    };
+    let needs_file_switch = review
+        .threads
+        .iter()
+        .find(|t| t.id == tid)
+        .map(|t| review.current_file.as_deref() != Some(&t.file))
+        .unwrap_or(false);
+    if needs_file_switch {
+        if let Some(file) = review
+            .threads
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| t.file.clone())
+        {
+            select_file_impl(review, &file);
+        }
+    }
+    open_thread_by_id(review, &tid);
+}
+
 fn open_thread_by_id(review: &Review, tid: &str) -> bool {
     if let Some(t) = review.threads.iter().find(|x| x.id == tid) {
         open_thread_panel(review, t);
