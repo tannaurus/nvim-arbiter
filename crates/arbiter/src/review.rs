@@ -131,6 +131,12 @@ pub struct Review {
     /// Per-file accepted hunk content hashes (review checklist).
     /// Used to fold and dim accepted hunks in the diff panel. Persisted in review state.
     pub accepted_hunks: HashMap<String, HashSet<String>>,
+    /// File navigation history for the `file_back` keymap.
+    ///
+    /// Pushed whenever the user navigates to a different file (next/prev file,
+    /// next/prev unreviewed, thread jumps, file panel selection, etc.).
+    /// Not pushed for re-renders of the current file or for `handle_file_back` itself.
+    pub file_history: Vec<String>,
 }
 
 /// Runs a closure with the active Review, if one exists.
@@ -192,7 +198,7 @@ pub fn open_thread_at(abs_file: &str, line: u32) {
         if needs_file_switch {
             r.pending_thread_open = Some(tid.clone());
             let rel = rel.to_string();
-            select_file_impl(r, &rel);
+            navigate_to_file(r, &rel);
         } else {
             scroll_to_thread_and_open(r, &tid);
         }
@@ -430,6 +436,7 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                             .filter(|(_, f)| !f.accepted_hunks.is_empty())
                             .map(|(p, f)| (p.clone(), f.accepted_hunks.iter().cloned().collect()))
                             .collect(),
+                        file_history: Vec::new(),
                     };
 
                     set_close_keymap(&mut review.file_panel.buf);
@@ -533,7 +540,7 @@ fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer) {
                 let line = row;
                 if let Some(path) = file_panel::path_at_line(&review.file_panel_line_to_path, line)
                 {
-                    select_file_impl(review, &path);
+                    navigate_to_file(review, &path);
                     let _ = api::set_current_win(&review.diff_panel.win);
                 } else if let Some(dir) = review.file_panel_line_to_dir.get(&line).cloned() {
                     if review.collapsed_dirs.contains(&dir) {
@@ -578,6 +585,7 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
     let next_unreviewed = config.keymaps.next_unreviewed.clone();
     let prev_unreviewed = config.keymaps.prev_unreviewed.clone();
     let accept_hunk = config.keymaps.accept_hunk.clone();
+    let file_back = config.keymaps.file_back.clone();
 
     let opts_cancel_request = SetKeymapOpts::builder()
         .callback(|_| {
@@ -935,6 +943,17 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, &accept_hunk, "", &opts_accept_hunk);
+
+    let opts_file_back = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_file_back);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, &file_back, "", &opts_file_back);
 }
 
 fn nav_next_hunk(review: &mut Review) {
@@ -1249,7 +1268,7 @@ fn nav_next_file(review: &mut Review) {
     let next_idx = (idx + 1) % review.files.len().max(1);
     let path = review.files.get(next_idx).map(|(p, _, _)| p.clone());
     if let Some(path) = path {
-        select_file_impl(review, &path);
+        navigate_to_file(review, &path);
     }
 }
 
@@ -1265,7 +1284,7 @@ fn nav_prev_file(review: &mut Review) {
     };
     let path = review.files.get(prev_idx).map(|(p, _, _)| p.clone());
     if let Some(path) = path {
-        select_file_impl(review, &path);
+        navigate_to_file(review, &path);
     }
 }
 
@@ -1295,11 +1314,6 @@ fn is_unreviewed_file(review: &Review, idx: usize) -> bool {
     file_has_open_threads(&review.threads, path)
 }
 
-fn push_jumplist_mark(review: &Review) {
-    let _ = api::set_current_win(&review.diff_panel.win);
-    let _ = api::command("normal! m'");
-}
-
 fn handle_next_unreviewed(review: &mut Review) {
     if review.files.is_empty() {
         return;
@@ -1314,13 +1328,20 @@ fn handle_next_unreviewed(review: &mut Review) {
         let idx = (current_idx + offset) % len;
         if is_unreviewed_file(review, idx) {
             if let Some((path, _, _)) = review.files.get(idx) {
-                push_jumplist_mark(review);
                 let path = path.clone();
-                select_file_impl(review, &path);
+                navigate_to_file(review, &path);
             }
             return;
         }
     }
+}
+
+fn handle_file_back(review: &mut Review) {
+    let Some(path) = review.file_history.pop() else {
+        return;
+    };
+    select_file_impl(review, &path);
+    rerender_file_panel(review);
 }
 
 fn handle_prev_unreviewed(review: &mut Review) {
@@ -1338,7 +1359,7 @@ fn handle_prev_unreviewed(review: &mut Review) {
         if is_unreviewed_file(review, idx) {
             if let Some((path, _, _)) = review.files.get(idx) {
                 let path = path.clone();
-                select_file_impl(review, &path);
+                navigate_to_file(review, &path);
             }
             return;
         }
@@ -1503,7 +1524,7 @@ pub fn open_active_thread(review: &mut Review) {
             .find(|t| t.id == tid)
             .map(|t| t.file.clone())
         {
-            select_file_impl(review, &file);
+            navigate_to_file(review, &file);
         }
     }
     open_thread_by_id(review, &tid);
@@ -2308,7 +2329,7 @@ fn nav_thread_directed(review: &mut Review, forward: bool) {
             let target_file = t.file.clone();
             let target_id = t.id.clone();
             if target_file != review.current_file.as_deref().unwrap_or_default() {
-                select_file_impl(review, &target_file);
+                navigate_to_file(review, &target_file);
             }
             if let Some(&target_line) = review.thread_buf_lines.get(&target_id) {
                 let _ = review.diff_panel.win.set_cursor(target_line + 1, 0);
@@ -2774,6 +2795,20 @@ fn update_diff_winbar(review: &Review, path: &str) {
         .win(review.diff_panel.win.clone())
         .build();
     let _ = api::set_option_value("winbar", title.as_str(), &win_opts);
+}
+
+/// Navigates to a file, pushing the current file onto `file_history` if changing.
+///
+/// Use this for user-initiated navigation (next/prev file, thread jumps, file
+/// panel clicks, etc.). For re-renders of the current file or for
+/// `handle_file_back`, call `select_file_impl` directly.
+fn navigate_to_file(review: &mut Review, path: &str) {
+    if review.current_file.as_deref() != Some(path) {
+        if let Some(prev) = review.current_file.clone() {
+            review.file_history.push(prev);
+        }
+    }
+    select_file_impl(review, path);
 }
 
 /// Calls `git::diff` (or synthesizes for untracked), then `diff::render`

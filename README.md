@@ -275,6 +275,7 @@ require("arbiter").setup({
     next_unreviewed = "<Leader>an",
     prev_unreviewed = "<Leader>ap",
     accept_hunk = "<Leader>as",
+    file_back = "<C-o>",
   },
 })
 ```
@@ -422,6 +423,7 @@ All keybindings are active in the review workbench tabpage and are fully configu
 |---------|--------|
 | `<Leader>s` | Toggle side-by-side diff view. |
 | `<Leader>aU` | Refresh file list and current diff. |
+| `<C-o>` | Navigate back through file history (works across file jumps, thread jumps, and auto-advance). |
 | `q` | Close the review workbench. |
 
 ### File panel

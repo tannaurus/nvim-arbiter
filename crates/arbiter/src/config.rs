@@ -287,6 +287,8 @@ pub struct KeymapConfig {
     pub prev_unreviewed: String,
     /// Toggle the hunk under the cursor as accepted in the review checklist.
     pub accept_hunk: String,
+    /// Go back to the previous file after auto-advance on approval.
+    pub file_back: String,
 }
 
 impl Default for KeymapConfig {
@@ -318,6 +320,7 @@ impl Default for KeymapConfig {
             next_unreviewed: "<Leader>an".to_string(),
             prev_unreviewed: "<Leader>ap".to_string(),
             accept_hunk: "<Leader>as".to_string(),
+            file_back: "<C-o>".to_string(),
         }
     }
 }
