@@ -95,7 +95,7 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 ```lua
 return {
   "tannaurus/nvim-arbiter",
-  tag = "v0.0.2", -- pin to a release tag
+  tag = "v0.0.3", -- pin to a release tag
   build = function()
     require("arbiter.build").download_or_build_binary()
   end,
