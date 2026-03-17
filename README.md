@@ -1,7 +1,7 @@
 # arbiter
 
 [![CI](https://github.com/tannaurus/nvim-arbiter/actions/workflows/ci.yml/badge.svg)](https://github.com/tannaurus/nvim-arbiter/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/tannaurus/nvim-arbiter?style=flat&label=release)](https://github.com/tannaurus/nvim-arbiter/releases/latest)
+[![Release](https://img.shields.io/github/v/release/tannaurus/nvim-arbiter?style=flat&label=release&include_prereleases)](https://github.com/tannaurus/nvim-arbiter/releases/latest)
 [![Neovim](https://img.shields.io/badge/neovim-0.10%2B-57A143?logo=neovim&logoColor=white)](https://neovim.io)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)]()
@@ -175,131 +175,124 @@ All fields are optional. Missing fields use the defaults shown below.
 
 ```lua
 require("arbiter").setup({
-  -- Backend CLI: "cursor" or "claude"
+  -- "cursor" or "claude". Determines which CLI binary is invoked.
   backend = "cursor",
 
-  -- Optional model override passed to the CLI
+  -- Model name passed to the backend CLI (e.g. "claude-sonnet-4-20250514").
+  -- nil uses the backend's default model.
   model = nil,
 
-  -- Workspace root (defaults to cwd)
+  -- Absolute path to the project root. Passed as the working directory
+  -- for all git and backend CLI operations. Defaults to cwd at setup time.
   workspace = nil,
 
-  -- Show thread indicators in the sign column of normal editing buffers
+  -- When true, places sign-column markers in normal editing buffers
+  -- at lines that have an active thread. Clicking a marker opens the thread.
   inline_indicators = false,
 
   review = {
     -- Git ref to diff against (e.g. "main", "develop").
-    -- Uses merge-base so only branch changes appear.
-    -- nil = diff against working tree with no base.
+    -- The diff uses merge-base so only your branch's changes appear.
+    -- nil = diff unstaged working-tree changes with no base ref.
     default_ref = nil,
 
-    -- Open in side-by-side view by default
+    -- Start the review workbench in side-by-side (vertical split) mode
+    -- instead of unified diff.
     side_by_side = false,
 
-    -- Automatically fold approved hunks
+    -- Automatically fold hunks that have been accepted via the accept_hunk
+    -- keymap. Folded hunks are dimmed and collapsed in the diff panel.
     fold_approved = false,
 
-    -- Seconds before auto-resolve comments are accepted
+    -- Seconds to wait before auto-resolve comments are marked resolved.
+    -- Auto-resolve comments (sent via the auto_resolve keymap) are
+    -- accepted automatically once the agent applies the requested change
+    -- and this timeout elapses without further edits.
     auto_resolve_timeout = 60,
 
-    -- File content poll interval (ms)
+    -- How often (ms) to poll the current file for on-disk changes and
+    -- re-render the diff panel.
     poll_interval = 2000,
 
-    -- File list refresh interval (ms)
+    -- How often (ms) to refresh the file list panel to pick up new,
+    -- deleted, or renamed files.
     file_list_interval = 5000,
 
-    -- Where to persist review state.
+    -- Directory for persisting review state, threads, and session history.
+    -- Each workspace gets a subdirectory keyed by a hash of its path.
     -- Default: ~/.local/share/nvim/arbiter
     state_dir = nil,
   },
 
-  -- Thread panel appearance
   thread_window = {
-    -- Split direction: "right", "left", "top", "bottom"
+    -- Where the thread conversation panel opens relative to the diff.
+    -- "right", "left", "top", or "bottom".
     position = "right",
 
-    -- Panel size in columns (left/right) or lines (top/bottom)
+    -- Panel width in columns (left/right) or height in lines (top/bottom).
     size = 60,
 
-    -- chrono format string for message timestamps
+    -- strftime format string for message timestamps in the thread panel.
     -- See https://docs.rs/chrono/latest/chrono/format/strftime/
     date_format = "%Y-%m-%d %H:%M",
   },
 
   prompts = {
-    -- Prompt sent by :ArbiterCatchUp
+    -- Prompt sent by :ArbiterCatchUp. Useful for resuming after a break.
     catch_up = "Summarize the changes you've made and the current state of the project.",
 
-    -- Review guidance sent by :ArbiterSelfReview.
-    -- Format instructions (THREAD|file|line|message) are appended automatically.
+    -- Review direction sent by :ArbiterSelfReview. Controls what the agent
+    -- looks for (tone, scope, strictness). The THREAD|file|line|message
+    -- output format instructions are appended automatically.
     self_review = "Review this diff and flag anything you're uncertain about or want feedback on.",
   },
 
-  -- Extra CLI flags appended to every backend invocation.
+  -- Extra CLI flags appended verbatim to every backend invocation.
+  -- Useful for backend-specific options like --dangerously-skip-permissions
+  -- (Claude) or --yolo (Cursor). Use with caution.
   extra_args = {},
 
-  -- Per-workspace overrides, keyed by absolute directory path.
-  -- The longest matching path wins. Useful when a repo uses a
-  -- non-standard primary branch.
+  -- Per-workspace overrides keyed by absolute path or regex pattern.
+  -- See "Per-workspace ref override" below for matching rules.
   workspaces = {
     ["/path/to/repo"] = {
       default_ref = "develop",
     },
   },
 
-  -- All keymaps can be overridden. These are the defaults:
+  -- All keymaps accept Neovim notation (e.g. "<Leader>s", "<C-o>", "]c").
+  -- Only active inside the review workbench tabpage.
   keymaps = {
-    next_hunk = "]c",
-    prev_hunk = "[c",
-    next_file = "]f",
-    prev_file = "[f",
-    next_thread = "]t",
-    prev_thread = "[t",
-    toggle_side_by_side = "<Leader>s",
-    approve = "<Leader>aa",
-    needs_changes = "<Leader>ax",
-    reset_status = "<Leader>ar",
-    comment = "<Leader>ac",
-    auto_resolve = "<Leader>aA",
-    open_thread = "<Leader>ao",
-    list_threads = "<Leader>aT",
-    list_threads_agent = "<Leader>aTa",
-    list_threads_user = "<Leader>aTu",
-    list_threads_binned = "<Leader>aTb",
-    list_threads_open = "<Leader>aTo",
-    resolve_thread = "<Leader>aR",
-    toggle_resolved = "<Leader>a?",
-    re_anchor = "<Leader>aP",
-    refresh = "<Leader>aU",
-    cancel_request = "<Leader>aK",
-    next_unreviewed = "<Leader>an",
-    prev_unreviewed = "<Leader>ap",
-    accept_hunk = "<Leader>as",
-    file_back = "<C-o>",
+    next_hunk = "]c",             -- Jump to next diff hunk
+    prev_hunk = "[c",             -- Jump to previous diff hunk
+    next_file = "]f",             -- Next file in the file list
+    prev_file = "[f",             -- Previous file in the file list
+    next_thread = "]t",           -- Next open thread (crosses files)
+    prev_thread = "[t",           -- Previous open thread (crosses files)
+    toggle_side_by_side = "<Leader>s",  -- Toggle unified / side-by-side view
+    approve = "<Leader>aa",       -- Approve file (or resolve thread at cursor)
+    needs_changes = "<Leader>ax", -- Mark file as needs-changes
+    reset_status = "<Leader>ar",  -- Reset file to unreviewed
+    comment = "<Leader>ac",       -- Comment on the line and send to the agent
+    auto_resolve = "<Leader>aA",  -- Comment with auto-resolve on agent fix
+    open_thread = "<Leader>ao",   -- Open thread conversation at cursor
+    list_threads = "<Leader>aT",  -- List all threads (quickfix)
+    list_threads_agent = "<Leader>aTa", -- List agent-created threads
+    list_threads_user = "<Leader>aTu",  -- List user-created threads
+    list_threads_binned = "<Leader>aTb", -- List resolved threads
+    list_threads_open = "<Leader>aTo",   -- List open threads
+    resolve_thread = "<Leader>aR",       -- Resolve/reopen thread at cursor
+    toggle_resolved = "<Leader>a?",      -- Toggle display of resolved threads
+    re_anchor = "<Leader>aP",     -- Re-anchor thread to current cursor line
+    refresh = "<Leader>aU",       -- Refresh file list and current diff
+    cancel_request = "<Leader>aK", -- Cancel all pending backend requests
+    next_unreviewed = "<Leader>an", -- Jump to next unreviewed file
+    prev_unreviewed = "<Leader>ap", -- Jump to previous unreviewed file
+    accept_hunk = "<Leader>as",   -- Accept/unaccept hunk under cursor
+    file_back = "<C-o>",          -- Navigate back through file history
   },
 })
 ```
-
-### Configuration reference
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `backend` | `string` | `"cursor"` | `"cursor"` or `"claude"` |
-| `model` | `string?` | `nil` | Model override passed to the CLI |
-| `workspace` | `string?` | cwd | Workspace root |
-| `inline_indicators` | `bool` | `false` | Show thread signs in normal buffers |
-| `review.default_ref` | `string?` | `nil` | Global default git ref for diffs |
-| `review.side_by_side` | `bool` | `false` | Start in side-by-side view |
-| `review.fold_approved` | `bool` | `false` | Fold approved hunks |
-| `review.auto_resolve_timeout` | `number` | `60` | Auto-resolve timeout (seconds) |
-| `review.poll_interval` | `number` | `2000` | File content poll interval (ms) |
-| `review.file_list_interval` | `number` | `5000` | File list refresh interval (ms) |
-| `review.state_dir` | `string?` | `~/.local/share/nvim/arbiter` | State persistence directory |
-| `thread_window.position` | `string` | `"right"` | Split direction: `"right"`, `"left"`, `"top"`, `"bottom"` |
-| `thread_window.size` | `number` | `60` | Panel size in columns (left/right) or lines (top/bottom) |
-| `thread_window.date_format` | `string` | `"%Y-%m-%d %H:%M"` | Timestamp format ([chrono strftime](https://docs.rs/chrono/latest/chrono/format/strftime/)) |
-| `extra_args` | `string[]` | `{}` | Extra CLI flags appended to every backend invocation |
-| `workspaces` | `table` | `{}` | Per-workspace overrides (see above) |
 
 ### Per-workspace ref override
 
@@ -374,6 +367,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterActiveThread` | Open the thread window for the agent that is currently thinking. |
 | `:ArbiterSelfReview` | Run agent self-review on the current diff. Creates agent threads. |
 | `:ArbiterRefresh` | Refresh the file list and current file diff. |
+| `:ArbiterOpenThread <file> <line>` | Open the thread at the given file and line number. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
 | `:ArbiterSummary` | Show review summary popup (file/thread counts). |
 
@@ -421,6 +415,7 @@ All keybindings are active in the review workbench tabpage and are fully configu
 
 | Default | Action |
 |---------|--------|
+| `<CR>` | Open the thread at the cursor line (or jump to source if no thread). |
 | `<Leader>s` | Toggle side-by-side diff view. |
 | `<Leader>aU` | Refresh file list and current diff. |
 | `<C-o>` | Navigate back through file history (works across file jumps, thread jumps, and auto-advance). |
