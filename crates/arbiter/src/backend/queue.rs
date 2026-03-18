@@ -59,9 +59,6 @@ pub(super) fn push(item: QueueItem) {
 }
 
 /// Pushes an item to the front of the queue so it runs next.
-///
-/// Used for rule extraction after agent responses - the extraction
-/// must complete before the next queued thread reply starts.
 pub(super) fn push_front(item: QueueItem) {
     // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
     QUEUE.lock().expect("queue lock").push_front(item);

@@ -26,7 +26,7 @@ These are decisions made during or around the review. They'd rot in a skill file
 
 ## Features
 
-- **PR-style diffs** -- Dedicated tabpage with file panel and diff viewer, scoped to the current branch via `git merge-base`.
+- **PR-style diffs** -- Dedicated tabpage with file panel and diff viewer. Diff against a branch via `git merge-base`, or diff unstaged working tree changes.
 - **Line-anchored threads** -- Comment on a diff line, get a streaming response. Threads persist across sessions.
 - **Review memory** -- Conventions you enforce get extracted and fed into future prompts automatically.
 - **Progress tracking** -- Approve files, accept hunks, filter threads by status. State saved to disk.
@@ -37,13 +37,18 @@ These are decisions made during or around the review. They'd rot in a skill file
 
 ## Workflow
 
-Arbiter is designed for a specific loop: an AI agent writes code, you review it, you give feedback, the agent revises, and you review again.
+Arbiter works in two modes depending on how you open it:
+
+- **Working tree review** (`:Arbiter`) - Diffs unstaged changes against HEAD. Use this when you're iterating with an agent in real time and haven't committed yet. You see exactly what the agent has changed since your last commit.
+- **Branch review** (`:ArbiterCompare main`) - Diffs your current branch against a base ref using `git merge-base`, so you only see changes introduced by your branch. This matches what a GitHub/GitLab PR would show. Use this when you're reviewing a full feature branch before merging. If you set `review.default_ref` in your config, `:ArbiterCompare` with no argument uses that ref.
+
+Both modes use the same workbench, threads, and feedback loop. The only difference is what the diff is computed against.
 
 ### The review loop
 
 1. **The agent works.** You give Cursor or Claude Code a task. It writes code across multiple files.
 
-2. **You open the workbench.** `:Arbiter main` opens a dedicated review tabpage. The left panel shows changed files (like a PR file list). The right panel shows the diff, starting on the first file you haven't approved yet. Only changes introduced by your branch appear - arbiter uses `git merge-base` so the diff matches what a GitHub/GitLab PR would show.
+2. **You open the workbench.** `:Arbiter` opens a review tabpage for unstaged changes, or `:ArbiterCompare main` diffs against a branch. The left panel shows changed files (like a PR file list). The right panel shows the diff, starting on the first file you haven't approved yet.
 
 3. **You review file by file.** Select files in the left panel with `<CR>`. Jump between hunks with `]c`/`[c`. Collapse directories you don't care about. Use `<Leader>s` for a side-by-side view when you need it.
 
@@ -76,7 +81,7 @@ Press `<Leader>s` on any file to open a side-by-side diff in a new tabpage using
 The default comparison branch is set in your config (globally or per-workspace). You can also change it on the fly:
 
 - `:ArbiterRef develop` - switch to comparing against `develop`
-- `:ArbiterRef` - clear the base (diff against working tree)
+- `:ArbiterRef` - clear the base (switch to working tree mode)
 
 See [Per-workspace ref override](#per-workspace-ref-override) for configuring defaults per repository.
 
@@ -100,7 +105,7 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 ```lua
 return {
   "tannaurus/nvim-arbiter",
-  tag = "v0.0.4", -- pin to a release tag
+  tag = "v0.0.5", -- pin to a release tag
   build = function()
     require("arbiter.build").download_or_build_binary()
   end,
@@ -155,7 +160,7 @@ require("arbiter").setup({
 
 On install or update, the `build` hook calls `arbiter.build.download_or_build_binary()` which:
 
-1. **Tries to download a prebuilt binary** from GitHub Releases matching the current git tag (e.g. `v0.1.0`). Binaries are available for Linux (glibc/musl, x86_64/aarch64) and macOS (x86_64/aarch64). If the current commit is not a tagged release, the download is skipped.
+1. **Tries to download a prebuilt binary** from GitHub Releases matching the current git tag (e.g. `v0.1.0`). Binaries are available for Linux (glibc, x86_64/aarch64) and macOS (x86_64/aarch64). If the current commit is not a tagged release, the download is skipped.
 2. **Validates the download** by loading it with `package.loadlib` before replacing the current binary (atomic `.tmp` rename).
 3. **Falls back to `cargo build --release`** if no prebuilt binary is available or the download fails.
 
@@ -195,17 +200,17 @@ require("arbiter").setup({
   -- at lines that have an active thread. Clicking a marker opens the thread.
   inline_indicators = false,
 
-  -- When true, resolving a thread sends the conversation to the agent to
-  -- extract generalizable coding conventions. Extracted rules are injected
-  -- into future thread prompts so the agent learns from your feedback.
-  -- Each extraction costs one additional backend call per agent response.
+  -- When true, every agent response triggers an extraction call to distill
+  -- generalizable coding conventions from the conversation. Extracted rules
+  -- are injected into future thread prompts so the agent learns from your
+  -- feedback. Each extraction costs one additional backend call per response.
   -- Toggle at runtime with :ArbiterToggleRules. View/edit with :ArbiterRules.
   learn_rules = true,
 
   review = {
-    -- Git ref to diff against (e.g. "main", "develop").
+    -- Default git ref for :ArbiterCompare (e.g. "main", "develop").
     -- The diff uses merge-base so only your branch's changes appear.
-    -- nil = diff unstaged working-tree changes with no base ref.
+    -- nil = :ArbiterCompare requires an explicit argument.
     default_ref = nil,
 
     -- Start the review workbench in side-by-side (vertical split) mode
@@ -329,13 +334,14 @@ workspaces = {
 - All other keys are compiled as **regex patterns** and tested against the full canonical directory path. The longest pattern string wins among regex matches.
 - Literal path matches always take priority over regex matches.
 
-**Resolution order** when opening a review (`:Arbiter` with no argument):
+**Resolution order** when opening a branch review (`:ArbiterCompare` with no argument):
 
-1. Explicit argument (`:Arbiter some-branch`)
+1. Explicit argument (`:ArbiterCompare some-branch`)
 2. Longest-matching literal path override from `workspaces`
 3. Longest-matching regex override from `workspaces`
 4. Global `review.default_ref`
-5. No base (diffs against working tree)
+
+If none of these resolve, `:ArbiterCompare` shows an error. Use `:Arbiter` for unstaged changes instead.
 
 You can also change the ref on the fly during an active review with `:ArbiterRef`.
 
@@ -364,7 +370,8 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 
 | Command | Description |
 |---------|-------------|
-| `:Arbiter [ref]` | Open the review workbench. Optional ref overrides the default. |
+| `:Arbiter` | Open the review workbench for unstaged working tree changes. |
+| `:ArbiterCompare [ref]` | Open the review workbench diffed against a branch. Uses `review.default_ref` if no argument given. |
 | `:ArbiterSend <prompt>` | Send a prompt to the agent. Response streams into a panel. |
 | `:ArbiterContinue [prompt]` | Continue the current session with an optional follow-up. |
 | `:ArbiterCatchUp` | Ask the agent to summarize where it left off. |
@@ -383,7 +390,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterResolveAll` | Resolve all open threads. |
 | `:ArbiterSummary` | Show review summary popup (file/thread counts). |
 | `:ArbiterRules` | Open an editable popup with the current review rules. `:w` saves, `q` closes. |
-| `:ArbiterToggleRules` | Toggle automatic rule extraction on thread resolution. |
+| `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
 
 ## Keybindings
 

@@ -262,10 +262,7 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
         .unwrap_or_else(|_| ".".to_string());
 
     let config = config::get().clone();
-    let ref_name = ref_name
-        .or_else(|| config.default_ref_for(&cwd))
-        .unwrap_or("")
-        .to_string();
+    let ref_name = ref_name.unwrap_or("").to_string();
 
     api::command("tabnew")?;
     let tabpage = api::get_current_tabpage();
@@ -2574,10 +2571,6 @@ fn handle_resolve_thread(review: &mut Review) {
 
 /// Queues a rule-extraction call at the front of the backend queue
 /// so it runs before the next pending thread reply.
-///
-/// Called after every agent response when `learn_rules` is enabled.
-/// Extracts generalizable conventions from the thread conversation
-/// and appends any new rules to `review.review_rules`.
 fn maybe_queue_extraction(review: &Review, thread_id: &str) {
     if !review.learn_rules {
         return;
@@ -2621,9 +2614,7 @@ fn maybe_queue_extraction(review: &Review, thread_id: &str) {
                     .into_iter()
                     .filter(|rule| !r.review_rules.contains(rule))
                     .collect();
-                for rule in &added {
-                    r.review_rules.push(rule.clone());
-                }
+                r.review_rules.extend(added.iter().cloned());
                 if !added.is_empty() {
                     save_file_statuses(r);
                     if threads::window_thread_id().as_deref() == Some(tid.as_str()) {
@@ -3235,8 +3226,11 @@ fn ensure_diff_panel(review: &mut Review) -> bool {
     review.diff_panel.win = new_win.clone();
     let _ = api::set_current_win(&review.file_panel.win);
     let _ = api::command("vertical resize 40");
-    let win_opts = OptionOpts::builder().win(new_win).build();
-    let _ = api::set_option_value("winbar", " [arbiter] diff", &win_opts);
+    let _ = api::set_option_value(
+        "winbar",
+        " [arbiter] diff",
+        &OptionOpts::builder().win(new_win).build(),
+    );
     let _ = api::set_current_win(&saved_win);
     true
 }

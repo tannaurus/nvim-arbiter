@@ -50,9 +50,35 @@ fn with_review_cmd(f: impl FnOnce(&mut review::Review)) {
 pub fn register_commands() -> nvim_oxi::Result<()> {
     api::create_user_command(
         "Arbiter",
+        |_args: CommandArgs| {
+            let _ = review::open(None);
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterCompare",
         |args: CommandArgs| {
-            let ref_name = args.fargs.first().cloned().filter(|s| !s.is_empty());
-            let _ = review::open(ref_name.as_deref());
+            let ref_name = args
+                .fargs
+                .first()
+                .cloned()
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".to_string());
+                    config::get().default_ref_for(&cwd).map(String::from)
+                });
+            if let Some(r) = ref_name {
+                let _ = review::open(Some(&r));
+            } else {
+                api::err_writeln(
+                    "[arbiter] No ref specified. Pass one as an argument (:ArbiterCompare main) or set review.default_ref in your config.",
+                );
+            }
         },
         &CreateCommandOpts::builder()
             .nargs(CommandNArgs::ZeroOrOne)

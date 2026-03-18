@@ -65,9 +65,6 @@ pub fn send(opts: BackendOpts, on_stream: Option<OnStream>, callback: OnComplete
 }
 
 /// Enqueues a CLI call at the front of the queue so it runs next.
-///
-/// Used for rule extraction after agent responses. The extraction
-/// blocks subsequent queued items until it completes.
 pub fn send_priority(opts: BackendOpts, callback: OnComplete) {
     queue::push_front(queue::QueueItem {
         opts,
