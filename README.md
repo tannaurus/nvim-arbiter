@@ -8,32 +8,36 @@
 
 > **Experimental** - This plugin is under active development. APIs, commands, and keymaps may change without notice.
 
-Agentic review workbench for Neovim. Provides a structured diff viewer and thread-based review system for collaborating with AI coding agents (Cursor CLI, Claude Code CLI).
+Review workbench for Neovim. PR-style diffs, line-anchored threads, and a structured feedback loop with AI coding agents. Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi). Works with Cursor CLI and Claude Code CLI.
 
-Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a native shared library.
+## Why arbiter
+
+Agents can produce a 30-file changeset in minutes. Reviewing it shouldn't take all day.
+
+A chat window is one big conversation. Imagine doing a PR review where every comment to the author went into a single thread. You'd constantly be saying "going back to that thing on line 42..." and hoping they follow. PR reviews solved this with threads: each comment is its own scoped conversation anchored to a specific line, and everyone knows what's being discussed. Arbiter gives agents the same structure.
+
+In the best code reviews, the author doesn't just fix what you point out. They pick up on the pattern and apply it across the whole changeset. Review memory brings that to agents: conventions you enforce in one thread get extracted and fed into every subsequent prompt, so the agent applies your preferences before you ask. This isn't a replacement for skills or system prompts. It supplements them with things you notice during the review itself. For example:
+
+- "We're moving off callbacks to async/await in this refactor. Don't introduce new callback-style code." Specific to this effort, not a forever rule.
+- "The design doc says these endpoints return 201 for creates, not 200. Apply that to all the new handlers." A spec decision for this feature, not a global convention.
+- "This module returns `Option` not `Result` since absence isn't an error here." A recent design call that hasn't been codified anywhere.
+
+These are decisions made during or around the review. They'd rot in a skill file, but for the next 20 threads in this session you want the agent to know them.
 
 ## Features
 
-- **Review workbench** - Dedicated tabpage with a file panel (left) and diff panel (right)
-- **PR-style diffs** - Uses `git merge-base` so diffs only show changes introduced by the current branch, matching GitHub/GitLab PR behavior
-- **Thread-based comments** - Anchor comments to specific lines, track conversations with the agent
-- **Side-by-side diff** - Native `:diffthis` view with syntax highlighting in a separate tabpage
-- **Directory folding** - Collapse/expand directories in the file panel with `<CR>`
-- **Review status tracking** - Mark files as approved, needs-changes, or unreviewed; persisted across sessions
-- **Hunk acceptance checklist** - Accept individual hunks to track progress within a file; auto-approves the file when all hunks are accepted
-- **Auto-resolve** - Simple feedback that auto-approves once the agent applies the change
-- **Self-review** - Agent reviews its own diff and flags uncertainties as threads
-- **Thread filters** - View all threads, or filter by agent-created, user-created, or resolved
-- **Live polling** - Automatically refreshes diffs and file lists on a configurable interval
-- **Session persistence** - Review state, threads, and session history saved to disk
-- **Per-workspace config** - Override the default comparison branch per repository
-- **Backend shim** - Transparent support for both Cursor CLI and Claude Code CLI
-- **Review memory** - The agent learns your coding conventions as you resolve threads, applying them to future feedback in the same review (configurable, costs one extra backend call per resolved thread)
-- **Process cleanup** - Agent CLI processes are killed when Neovim exits; no orphaned processes
+- **PR-style diffs** -- Dedicated tabpage with file panel and diff viewer, scoped to the current branch via `git merge-base`.
+- **Line-anchored threads** -- Comment on a diff line, get a streaming response. Threads persist across sessions.
+- **Review memory** -- Conventions you enforce get extracted and fed into future prompts automatically.
+- **Progress tracking** -- Approve files, accept hunks, filter threads by status. State saved to disk.
+- **Self-review** -- The agent reviews its own diff and flags concerns before you start.
+- **Live diffs** -- Filesystem polling picks up the agent's changes without manual refresh.
+- **Auto-resolve** -- Simple feedback ("rename this") resolves itself once the agent applies the fix.
+- **Session persistence** -- Review state, threads, and conversations restored when you reopen.
 
 ## Workflow
 
-Arbiter is designed for a specific loop: an AI agent writes code, you review it, you give feedback, the agent revises, and you review again. This is fundamentally different from reviewing human-written code - you didn't write any of it, so you need to understand intent, verify correctness, and steer the agent, all without leaving Neovim.
+Arbiter is designed for a specific loop: an AI agent writes code, you review it, you give feedback, the agent revises, and you review again.
 
 ### The review loop
 
