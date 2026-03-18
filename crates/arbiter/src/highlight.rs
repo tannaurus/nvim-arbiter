@@ -11,7 +11,7 @@ use nvim_oxi::api::{self};
 /// Each group links to a built-in Neovim group so they inherit
 /// the user's colorscheme. Users can override with `nvim_set_hl()`.
 pub fn setup() -> nvim_oxi::Result<()> {
-    let groups: [(&str, &str); 14] = [
+    let groups: [(&str, &str); 15] = [
         ("ArbiterDiffAdd", "DiffAdd"),
         ("ArbiterDiffDelete", "DiffDelete"),
         ("ArbiterDiffChange", "DiffChange"),
@@ -26,6 +26,7 @@ pub fn setup() -> nvim_oxi::Result<()> {
         ("ArbiterHunkAccepted", "Comment"),
         ("ArbiterIndicatorUser", "DiagnosticHint"),
         ("ArbiterIndicatorAgent", "DiagnosticWarn"),
+        ("ArbiterRuleLearned", "DiagnosticOk"),
     ];
 
     for (name, link_to) in groups {

@@ -11,12 +11,13 @@ use crate::review;
 use crate::state;
 use crate::threads;
 use crate::types::ThreadOrigin;
+use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::opts::CreateCommandOpts;
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::opts::SetKeymapOpts;
 use nvim_oxi::api::types::{CommandArgs, CommandNArgs, LogLevel, Mode};
 use nvim_oxi::api::types::{WindowBorder, WindowRelativeTo, WindowTitle};
-use nvim_oxi::api::{self};
+use nvim_oxi::api::{self, Buffer};
 use nvim_oxi::Dictionary;
 use std::cell::RefCell;
 use std::path::Path;
@@ -521,5 +522,153 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
             .build(),
     )?;
 
+    api::create_user_command(
+        "ArbiterRules",
+        |_args: CommandArgs| {
+            with_review_cmd(open_rules_window);
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterToggleRules",
+        |_args: CommandArgs| {
+            with_review_cmd(|r| {
+                r.learn_rules = !r.learn_rules;
+                let state = if r.learn_rules { "enabled" } else { "disabled" };
+                let _ = api::notify(
+                    &format!("[arbiter] rule learning {state}"),
+                    LogLevel::Info,
+                    &Dictionary::default(),
+                );
+            });
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
     Ok(())
+}
+
+fn open_rules_window(r: &mut review::Review) {
+    let rules = r.review_rules.clone();
+
+    let mut buf = match api::create_buf(false, true) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let _ = api::set_option_value("buftype", "acwrite", &buf_opts);
+    let _ = api::set_option_value("filetype", "markdown", &buf_opts);
+
+    let refs: Vec<&str> = rules.iter().map(|s| s.as_str()).collect();
+    if !refs.is_empty() {
+        let _ = buf.set_lines(0..0, false, refs);
+    }
+    let _ = api::set_option_value("modified", false, &buf_opts);
+
+    let cols =
+        api::get_option_value::<i64>("columns", &OptionOpts::builder().build()).unwrap_or(80);
+    let rows = api::get_option_value::<i64>("lines", &OptionOpts::builder().build()).unwrap_or(24);
+    let width = ((cols as f64) * 0.8) as u32;
+    let height = ((rows as f64) * 0.8) as u32;
+    let row = ((rows as f64) - (height as f64)) / 2.0;
+    let col = ((cols as f64) - (width as f64)) / 2.0;
+
+    let config = nvim_oxi::api::types::WindowConfig::builder()
+        .relative(WindowRelativeTo::Editor)
+        .width(width)
+        .height(height)
+        .row(row)
+        .col(col)
+        .border(WindowBorder::Rounded)
+        .title(WindowTitle::SimpleString(
+            " Review Rules (one per line, :w to save, q to close) "
+                .to_string()
+                .into(),
+        ))
+        .build();
+    let win = match api::open_win(&buf, true, &config) {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let win_opts = OptionOpts::builder().win(win.clone()).build();
+    let _ = api::set_option_value("number", false, &win_opts);
+    let _ = api::set_option_value("relativenumber", false, &win_opts);
+    let _ = api::set_option_value("wrap", true, &win_opts);
+    let _ = api::set_option_value("cursorline", true, &win_opts);
+
+    let win_cell = std::sync::Arc::new(std::sync::Mutex::new(Some(win)));
+
+    let save_buf = buf.clone();
+    let save_opts = SetKeymapOpts::builder()
+        .callback(move |_| {
+            save_rules_from_buf(&save_buf);
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<C-s>", "", &save_opts);
+
+    let buf_for_write = buf.clone();
+    let _ = api::create_autocmd(
+        ["BufWriteCmd"],
+        &CreateAutocmdOpts::builder()
+            .buffer(buf.clone())
+            .callback(move |_args| {
+                save_rules_from_buf(&buf_for_write);
+                let _ = api::set_option_value(
+                    "modified",
+                    false,
+                    &OptionOpts::builder().buffer(buf_for_write.clone()).build(),
+                );
+                true
+            })
+            .build(),
+    );
+
+    let opts_q = SetKeymapOpts::builder()
+        .callback(move |_| {
+            if let Ok(mut g) = win_cell.lock() {
+                if let Some(w) = g.take() {
+                    let _ = w.close(false);
+                }
+            }
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "q", "", &opts_q);
+}
+
+fn save_rules_from_buf(buf: &Buffer) {
+    let line_count = buf.line_count().unwrap_or(0);
+    if line_count == 0 {
+        review::with_active(|r| {
+            r.review_rules.clear();
+            review::save_file_statuses_pub(r);
+        });
+        return;
+    }
+    let lines = match buf.get_lines(0..line_count, true) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let rules: Vec<String> = lines
+        .into_iter()
+        .map(|l| l.to_string_lossy().to_string())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    review::with_active(|r| {
+        r.review_rules = rules;
+        review::save_file_statuses_pub(r);
+    });
+    let _ = api::notify(
+        "[arbiter] review rules saved",
+        LogLevel::Info,
+        &Dictionary::default(),
+    );
 }

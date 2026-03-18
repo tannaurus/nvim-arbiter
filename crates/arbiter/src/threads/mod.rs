@@ -8,9 +8,9 @@ pub(crate) mod window;
 
 pub use input::{close as input_close, open, open_for_line, OnCancel, OnSubmit};
 pub use window::{
-    append_message, append_streaming, close as window_close, current_thread_id as window_thread_id,
-    is_open as window_is_open, open as window_open, replace_last_agent_message, OnClose,
-    OnReplyRequested,
+    append_learned_rules, append_message, append_status, append_streaming, close as window_close,
+    current_thread_id as window_thread_id, is_open as window_is_open, open as window_open,
+    replace_last_agent_message, OnClose, OnReplyRequested,
 };
 
 use crate::types::{Role, ThreadOrigin, ThreadStatus};

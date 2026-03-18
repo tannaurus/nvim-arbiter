@@ -137,6 +137,16 @@ pub struct Review {
     /// next/prev unreviewed, thread jumps, file panel selection, etc.).
     /// Not pushed for re-renders of the current file or for `handle_file_back` itself.
     pub file_history: Vec<String>,
+    /// When set, the next diff render will jump to the first (true) or last
+    /// (false) unaccepted hunk. Used for cross-file `]c` / `[c` navigation.
+    pub pending_hunk_nav: Option<bool>,
+    /// Generalizable coding conventions extracted from resolved threads.
+    /// Injected into every thread prompt so the agent "learns" the reviewer's
+    /// preferences over the course of the review.
+    pub review_rules: Vec<String>,
+    /// Runtime toggle for the learn_rules feature. Initialized from
+    /// `config.learn_rules` and can be toggled with `:ArbiterToggleRules`.
+    pub learn_rules: bool,
 }
 
 /// Runs a closure with the active Review, if one exists.
@@ -206,6 +216,9 @@ pub fn open_thread_at(abs_file: &str, line: u32) {
 }
 
 fn scroll_to_thread_and_open(review: &mut Review, tid: &str) {
+    if !ensure_diff_panel(review) {
+        return;
+    }
     let Some(t) = review.threads.iter().find(|t| t.id == tid) else {
         return;
     };
@@ -437,6 +450,9 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                             .map(|(p, f)| (p.clone(), f.accepted_hunks.iter().cloned().collect()))
                             .collect(),
                         file_history: Vec::new(),
+                        pending_hunk_nav: None,
+                        review_rules: review_state.review_rules.clone(),
+                        learn_rules: config.learn_rules,
                     };
 
                     set_close_keymap(&mut review.file_panel.buf);
@@ -540,6 +556,9 @@ fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer) {
                 let line = row;
                 if let Some(path) = file_panel::path_at_line(&review.file_panel_line_to_path, line)
                 {
+                    if !ensure_diff_panel(review) {
+                        return;
+                    }
                     navigate_to_file(review, &path);
                     let _ = api::set_current_win(&review.diff_panel.win);
                 } else if let Some(dir) = review.file_panel_line_to_dir.get(&line).cloned() {
@@ -957,6 +976,7 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
 }
 
 fn nav_next_hunk(review: &mut Review) {
+    let accepted = accepted_for_file(review);
     let (row, _) = review
         .diff_panel
         .win
@@ -967,14 +987,16 @@ fn nav_next_hunk(review: &mut Review) {
     let next = review
         .current_hunks
         .iter()
-        .find(|h| h.buf_start > line_0)
-        .or_else(|| review.current_hunks.first());
+        .find(|h| h.buf_start > line_0 && !accepted.contains(&h.content_hash));
     if let Some(hunk) = next {
         scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
+        return;
     }
+    nav_hunk_cross_file(review, true);
 }
 
 fn nav_prev_hunk(review: &mut Review) {
+    let accepted = accepted_for_file(review);
     let (row, _) = review
         .diff_panel
         .win
@@ -985,10 +1007,34 @@ fn nav_prev_hunk(review: &mut Review) {
     let prev = review
         .current_hunks
         .iter()
-        .rfind(|h| h.buf_start < line_0)
-        .or_else(|| review.current_hunks.last());
+        .rfind(|h| h.buf_start < line_0 && !accepted.contains(&h.content_hash));
     if let Some(hunk) = prev {
         scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
+        return;
+    }
+    nav_hunk_cross_file(review, false);
+}
+
+fn nav_hunk_cross_file(review: &mut Review, forward: bool) {
+    let Some(ref path) = review.current_file else {
+        return;
+    };
+    let idx = review.file_index.get(path).copied().unwrap_or(0);
+    let len = review.files.len();
+    if len == 0 {
+        return;
+    }
+    let next_idx = if forward {
+        (idx + 1) % len
+    } else if idx == 0 {
+        len - 1
+    } else {
+        idx - 1
+    };
+    if let Some((next_path, _, _)) = review.files.get(next_idx) {
+        let next_path = next_path.clone();
+        review.pending_hunk_nav = Some(forward);
+        navigate_to_file(review, &next_path);
     }
 }
 
@@ -998,6 +1044,26 @@ fn scroll_to_hunk(review: &mut Review, buf_start: usize, buf_end: usize) {
     let end_1 = (buf_end + 1) as i64;
     let _ = review.diff_panel.win.set_cursor(buf_end + 1, 0);
     diff::win_exec(wid, &format!("normal! {start_1}Gzt{end_1}G"));
+}
+
+fn apply_pending_hunk_nav(review: &mut Review) {
+    let Some(forward) = review.pending_hunk_nav.take() else {
+        return;
+    };
+    let accepted = accepted_for_file(review);
+    let unaccepted: Vec<_> = review
+        .current_hunks
+        .iter()
+        .filter(|h| !accepted.contains(&h.content_hash))
+        .collect();
+    let target = if forward {
+        unaccepted.first()
+    } else {
+        unaccepted.last()
+    };
+    if let Some(hunk) = target {
+        scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
+    }
 }
 
 fn accepted_for_file(review: &Review) -> HashSet<String> {
@@ -1189,12 +1255,25 @@ fn check_all_hunks_accepted(review: &mut Review) {
 fn save_file_statuses(review: &Review) {
     let sd = review.config.state_dir();
     let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-    let mut rs = state::ReviewState::default();
+    let mut rs = build_review_state(review);
     for (p, _, status) in &review.files {
         rs.files
             .insert(p.clone(), file_state_for(review, p, *status));
     }
     state::save_review(&sd, &ws_hash, &review.ref_name, &rs);
+}
+
+/// Entry point for saving file statuses, used by commands that
+/// modify review state from outside this module (e.g. the rules editor).
+pub(crate) fn save_file_statuses_pub(review: &Review) {
+    save_file_statuses(review);
+}
+
+fn build_review_state(review: &Review) -> state::ReviewState {
+    state::ReviewState {
+        review_rules: review.review_rules.clone(),
+        ..Default::default()
+    }
 }
 
 fn update_accepted_fold_state(review: &mut Review) {
@@ -1401,6 +1480,7 @@ fn make_thread_reply_callback(
                         let stream_tid = tid.clone();
                         let on_stream: crate::types::OnStream =
                             std::sync::Arc::new(move |chunk: &str| {
+                                backend::append_inflight_stream(chunk);
                                 if threads::window_thread_id().as_deref() == Some(&stream_tid) {
                                     let _ = threads::append_streaming(chunk);
                                 }
@@ -1416,6 +1496,11 @@ fn make_thread_reply_callback(
                                 (role.to_string(), m.text.clone())
                             })
                             .collect();
+                        let review_ctx = prompts::ReviewContext {
+                            ref_name: &r.ref_name,
+                            file_diff: &r.current_diff_text,
+                            review_rules: &r.review_rules,
+                        };
                         let prompt = prompts::format_reply_prompt(
                             &t.file,
                             t.line,
@@ -1423,9 +1508,11 @@ fn make_thread_reply_callback(
                             &t.anchor_content,
                             &t.anchor_context,
                             &prior_messages,
+                            &review_ctx,
                         );
                         let file_notify = file_for_notify.clone();
                         let reply_tag = tid.clone();
+                        let status_tid = tid.clone();
                         backend::cancel_tagged(&tid);
                         backend::thread_reply(
                             session_id.as_deref(),
@@ -1437,6 +1524,7 @@ fn make_thread_reply_callback(
                                     .as_ref()
                                     .map(|e| format!("[Error] {e}"))
                                     .unwrap_or(res.text);
+                                let had_error = res.error.is_some();
                                 if let Some(ref e) = res.error {
                                     backend::notify_if_missing_binary(e);
                                     let _ = api::notify(
@@ -1460,6 +1548,9 @@ fn make_thread_reply_callback(
                                             select_file_impl(r, &p);
                                         }
                                     }
+                                    if !had_error {
+                                        maybe_queue_extraction(r, &tid);
+                                    }
                                 });
                                 if !threads::window_is_open() {
                                     let preview: String = msg.chars().take(60).collect();
@@ -1474,6 +1565,7 @@ fn make_thread_reply_callback(
                             }),
                             Some(reply_tag),
                         );
+                        show_thread_queue_status(&status_tid);
                         state::save_threads(&sd2, &ws2, &rn2, &r.threads);
                         if let Some(ref p) = r.current_file {
                             let p = p.clone();
@@ -1500,6 +1592,11 @@ fn open_thread_panel(review: &Review, t: &threads::Thread) {
         Some(on_close),
     );
     place_thread_anchor(review, t.line);
+    let is_inflight = backend::inflight_tag().as_deref() == Some(&t.id);
+    let is_queued = backend::queue_position(&t.id).is_some();
+    if is_inflight || is_queued {
+        show_thread_queue_status(&t.id);
+    }
 }
 
 pub fn open_active_thread(review: &mut Review) {
@@ -1528,6 +1625,10 @@ pub fn open_active_thread(review: &mut Review) {
         }
     }
     open_thread_by_id(review, &tid);
+    let streamed = backend::inflight_stream();
+    if !streamed.is_empty() {
+        let _ = threads::append_streaming(&streamed);
+    }
 }
 
 fn open_thread_by_id(review: &Review, tid: &str) -> bool {
@@ -2056,10 +2157,30 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
             );
             with_active(|r| place_thread_anchor(r, thread.line));
 
-            let prompt =
-                prompts::format_comment_prompt(&path, line, &trimmed, &anchor_content, &context);
+            let (rules, ref_name, file_diff) = with_active(|r| {
+                (
+                    r.review_rules.clone(),
+                    r.ref_name.clone(),
+                    r.current_diff_text.clone(),
+                )
+            })
+            .unwrap_or_default();
+            let review_ctx = prompts::ReviewContext {
+                ref_name: &ref_name,
+                file_diff: &file_diff,
+                review_rules: &rules,
+            };
+            let prompt = prompts::format_comment_prompt(
+                &path,
+                line,
+                &trimmed,
+                &anchor_content,
+                &context,
+                &review_ctx,
+            );
             let stream_tid = tid.clone();
             let on_stream: crate::types::OnStream = std::sync::Arc::new(move |chunk: &str| {
+                backend::append_inflight_stream(chunk);
                 if threads::window_thread_id().as_deref() == Some(&stream_tid) {
                     let _ = threads::append_streaming(chunk);
                 }
@@ -2067,6 +2188,7 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
             let file_notify = path.clone();
             let comment_tag = tid.clone();
             let window_tid = tid.clone();
+            let status_tid = tid.clone();
             backend::send_comment(
                 &prompt,
                 Some(on_stream),
@@ -2076,7 +2198,8 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                         .as_ref()
                         .map(|e| format!("[Error] {e}"))
                         .unwrap_or(res.text);
-                    if res.error.is_some() {
+                    let had_error = res.error.is_some();
+                    if had_error {
                         backend::notify_if_missing_binary(&msg);
                         let _ = api::notify(
                             &format!("Comment failed: {msg}"),
@@ -2099,8 +2222,11 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                             let p = p.clone();
                             select_file_impl(r, &p);
                         }
+                        if !had_error {
+                            maybe_queue_extraction(r, &tid);
+                        }
                     });
-                    if !threads::window_is_open() && res.error.is_none() {
+                    if !threads::window_is_open() && !had_error {
                         let preview: String = msg.chars().take(60).collect();
                         let _ = api::notify(
                             &format!("[arbiter] Agent replied on {file_notify}:{line}: {preview}"),
@@ -2111,6 +2237,7 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                 }),
                 Some(comment_tag),
             );
+            show_thread_queue_status(&status_tid);
         }),
         Box::new(|| {}),
     ) {
@@ -2118,97 +2245,311 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
     }
 }
 
-fn lua_quote(s: &str) -> String {
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\0', "");
-    format!("\"{escaped}\"")
-}
-
 fn handle_list_threads(review: &mut Review) {
     handle_list_threads_filtered(review, threads::FilterOpts::default());
 }
 
+struct ThreadListState {
+    line_map: Vec<Option<(String, ThreadStatus)>>,
+    filter: threads::FilterOpts,
+}
+
 fn handle_list_threads_filtered(review: &mut Review, opts: threads::FilterOpts) {
-    let mut filtered = threads::filter(&review.threads, &opts);
+    let filtered = threads::filter(&review.threads, &opts);
     if filtered.is_empty() {
         api::err_writeln("[arbiter] no threads match filter");
         return;
     }
-    filtered.sort_by(|a, b| {
-        let ts_a = a.messages.last().map(|m| m.ts).unwrap_or(0);
-        let ts_b = b.messages.last().map(|m| m.ts).unwrap_or(0);
-        ts_b.cmp(&ts_a)
-    });
-    let date_fmt = &config::get().thread_window.date_format;
-    let cwd = &review.cwd;
-    let mut lua_items = String::from("{");
-    for (i, t) in filtered.iter().enumerate() {
-        if i > 0 {
-            lua_items.push(',');
+    let content = build_thread_list_lines(&filtered);
+
+    let mut buf = match api::create_buf(false, true) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let _ = api::set_option_value("buftype", "nofile", &buf_opts);
+    let refs: Vec<&str> = content.lines.iter().map(|s| s.as_str()).collect();
+    let _ = buf.set_lines(0..0, false, refs);
+    let _ = api::set_option_value("modifiable", false, &buf_opts);
+
+    apply_thread_list_highlights(&mut buf, &content.highlights);
+
+    let cols =
+        api::get_option_value::<i64>("columns", &OptionOpts::builder().build()).unwrap_or(80);
+    let rows = api::get_option_value::<i64>("lines", &OptionOpts::builder().build()).unwrap_or(24);
+    let width = ((cols as f64) * 0.8) as u32;
+    let height = ((rows as f64) * 0.8) as u32;
+    let row = ((rows as f64) - (height as f64)) / 2.0;
+    let col = ((cols as f64) - (width as f64)) / 2.0;
+
+    let title = match (&opts.origin, &opts.status) {
+        (Some(ThreadOrigin::Agent), _) => " Agent Threads ",
+        (Some(ThreadOrigin::User), _) => " User Threads ",
+        (_, Some(ThreadStatus::Open)) => " Open Threads ",
+        (_, Some(ThreadStatus::Binned)) => " Binned Threads ",
+        (_, Some(ThreadStatus::Resolved)) => " Resolved Threads ",
+        _ => " Threads ",
+    };
+
+    let win_config = nvim_oxi::api::types::WindowConfig::builder()
+        .relative(nvim_oxi::api::types::WindowRelativeTo::Editor)
+        .width(width)
+        .height(height)
+        .row(row)
+        .col(col)
+        .border(nvim_oxi::api::types::WindowBorder::Rounded)
+        .title(nvim_oxi::api::types::WindowTitle::SimpleString(
+            title.to_string().into(),
+        ))
+        .build();
+    let mut win = match api::open_win(&buf, true, &win_config) {
+        Ok(w) => w,
+        Err(_) => return,
+    };
+    let win_opts = OptionOpts::builder().win(win.clone()).build();
+    let _ = api::set_option_value("number", false, &win_opts);
+    let _ = api::set_option_value("relativenumber", false, &win_opts);
+    let _ = api::set_option_value("wrap", false, &win_opts);
+    let _ = api::set_option_value("cursorline", true, &win_opts);
+
+    let first_entry = content
+        .line_map
+        .iter()
+        .position(|e| e.is_some())
+        .unwrap_or(0)
+        + 1;
+    let _ = win.set_cursor(first_entry, 0);
+
+    let state = Arc::new(std::sync::Mutex::new(ThreadListState {
+        line_map: content.line_map,
+        filter: opts,
+    }));
+    let win_cell = Arc::new(std::sync::Mutex::new(Some(win)));
+
+    // q -> close
+    let q_win = win_cell.clone();
+    let opts_q = SetKeymapOpts::builder()
+        .callback(move |_| {
+            if let Ok(mut g) = q_win.lock() {
+                if let Some(w) = g.take() {
+                    let _ = w.close(false);
+                }
+            }
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "q", "", &opts_q);
+
+    let esc_win = win_cell.clone();
+    let opts_esc = SetKeymapOpts::builder()
+        .callback(move |_| {
+            if let Ok(mut g) = esc_win.lock() {
+                if let Some(w) = g.take() {
+                    let _ = w.close(false);
+                }
+            }
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<Esc>", "", &opts_esc);
+
+    // <CR> -> navigate to thread and open it
+    let cr_win = win_cell.clone();
+    let cr_state = state.clone();
+    let opts_cr = SetKeymapOpts::builder()
+        .callback(move |_| {
+            let (cursor_row, _) = api::get_current_win().get_cursor().ok().unwrap_or((1, 0));
+            let line_idx = cursor_row.saturating_sub(1);
+            let entry = {
+                let guard = cr_state.lock().expect("state lock");
+                guard.line_map.get(line_idx).and_then(|x| x.clone())
+            };
+            let Some((tid, _)) = entry else {
+                return Ok::<(), nvim_oxi::Error>(());
+            };
+            if let Ok(mut g) = cr_win.lock() {
+                if let Some(w) = g.take() {
+                    let _ = w.close(false);
+                }
+            }
+            with_active(|r| {
+                r.pending_thread_open = Some(tid);
+                if let Some(file) = r
+                    .threads
+                    .iter()
+                    .find(|t| t.id == r.pending_thread_open.as_deref().unwrap_or(""))
+                    .map(|t| t.file.clone())
+                {
+                    navigate_to_file(r, &file);
+                }
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<CR>", "", &opts_cr);
+
+    // dd -> resolve (Open/Binned) or dismiss (Resolved), then re-render
+    let dd_buf = buf.clone();
+    let dd_state = state.clone();
+    let dd_win = win_cell;
+    let opts_dd = SetKeymapOpts::builder()
+        .callback(move |_| {
+            let (cursor_row, _) = api::get_current_win().get_cursor().ok().unwrap_or((1, 0));
+            let line_idx = cursor_row.saturating_sub(1);
+            let (entry, filter) = {
+                let guard = dd_state.lock().expect("state lock");
+                let e = guard.line_map.get(line_idx).and_then(|x| x.clone());
+                (e, guard.filter.clone())
+            };
+            let Some((tid, status)) = entry else {
+                return Ok::<(), nvim_oxi::Error>(());
+            };
+            with_active(|r| {
+                match status {
+                    ThreadStatus::Open | ThreadStatus::Binned => {
+                        if let Some(t) = r.threads.iter_mut().find(|t| t.id == tid) {
+                            threads::resolve(t);
+                        }
+                    }
+                    ThreadStatus::Resolved => {
+                        if let Some(idx) = r.threads.iter().position(|t| t.id == tid) {
+                            threads::dismiss(&mut r.threads, idx);
+                        }
+                    }
+                }
+                save_threads(r);
+
+                let filtered = threads::filter(&r.threads, &filter);
+                if filtered.is_empty() {
+                    if let Ok(mut g) = dd_win.lock() {
+                        if let Some(w) = g.take() {
+                            let _ = w.close(false);
+                        }
+                    }
+                } else {
+                    let new_content = build_thread_list_lines(&filtered);
+                    let mut b = dd_buf.clone();
+                    let bo = OptionOpts::builder().buffer(b.clone()).build();
+                    let _ = api::set_option_value("modifiable", true, &bo);
+                    let lc = b.line_count().unwrap_or(0);
+                    let refs: Vec<&str> = new_content.lines.iter().map(|s| s.as_str()).collect();
+                    let _ = b.set_lines(0..lc, false, refs);
+                    let _ = api::set_option_value("modifiable", false, &bo);
+                    apply_thread_list_highlights(&mut b, &new_content.highlights);
+
+                    let mut guard = dd_state.lock().expect("state lock");
+                    guard.line_map = new_content.line_map;
+                }
+
+                if let Some(ref p) = r.current_file {
+                    let p = p.clone();
+                    select_file_impl(r, &p);
+                }
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "dd", "", &opts_dd);
+}
+
+struct ThreadListContent {
+    lines: Vec<String>,
+    line_map: Vec<Option<(String, ThreadStatus)>>,
+    highlights: Vec<(usize, &'static str)>,
+}
+
+fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
+    let mut lines = Vec::new();
+    let mut line_map: Vec<Option<(String, ThreadStatus)>> = Vec::new();
+    let mut highlights: Vec<(usize, &'static str)> = Vec::new();
+
+    let mut open: Vec<&threads::Thread> = Vec::new();
+    let mut binned: Vec<&threads::Thread> = Vec::new();
+    let mut resolved: Vec<&threads::Thread> = Vec::new();
+
+    for t in threads {
+        match t.status {
+            ThreadStatus::Open => open.push(t),
+            ThreadStatus::Binned => binned.push(t),
+            ThreadStatus::Resolved => resolved.push(t),
         }
-        let abs_path = format!("{}/{}", cwd, t.file);
-        let preview = t
-            .messages
-            .first()
-            .map(|m| m.text.chars().take(60).collect::<String>())
-            .unwrap_or_default();
-        let ts_display = t
-            .messages
-            .last()
-            .and_then(|m| chrono::DateTime::from_timestamp(m.ts, 0))
-            .map(|dt| {
-                dt.with_timezone(&chrono::Local)
-                    .format(date_fmt)
-                    .to_string()
-            })
-            .unwrap_or_default();
-        let status_icon = match t.status {
-            ThreadStatus::Open => "●",
-            ThreadStatus::Resolved => "✓",
-            ThreadStatus::Binned => "✗",
-        };
-        let label = format!("{status_icon} {ts_display}  {preview}");
-        lua_items.push_str(&format!(
-            "{{filename={},lnum={},col=1,text={}}}",
-            lua_quote(&abs_path),
-            t.line,
-            lua_quote(&label),
-        ));
     }
-    lua_items.push('}');
-    let lua = format!(
-        concat!(
-            "vim.fn.setqflist({{}},\" \",{{title=\"Threads\",items={}}}) ",
-            "vim.cmd(\"copen\") ",
-            "vim.api.nvim_buf_set_keymap(0,\"n\",\"dd\",\"\",{{",
-            "callback=function() ",
-            "local i=vim.fn.line(\".\") ",
-            "local q=vim.fn.getqflist() ",
-            "table.remove(q,i) ",
-            "vim.fn.setqflist(q,\"r\") ",
-            "end,noremap=true,silent=true}}) ",
-            "vim.api.nvim_buf_set_keymap(0,\"n\",\"<CR>\",\"\",{{",
-            "callback=function() ",
-            "local e=vim.fn.getqflist()[vim.fn.line(\".\")] ",
-            "if e then ",
-            "vim.cmd(\"ArbiterOpenThread \"..vim.fn.bufname(e.bufnr)..\" \"..e.lnum) ",
-            "end ",
-            "end,noremap=true,silent=true}}) ",
-            "vim.api.nvim_buf_set_keymap(0,\"n\",\"gf\",\"\",{{",
-            "callback=function() ",
-            "local e=vim.fn.getqflist()[vim.fn.line(\".\")] ",
-            "if e then ",
-            "vim.cmd(\"edit +\"..e.lnum..\" \"..vim.fn.bufname(e.bufnr)) ",
-            "end ",
-            "end,noremap=true,silent=true}})",
-        ),
-        lua_items
-    );
-    let _ = api::command(&format!("lua {lua}"));
+
+    let created_ts = |t: &&threads::Thread| t.messages.first().map(|m| m.ts).unwrap_or(0);
+    let sort_newest_first =
+        |a: &&threads::Thread, b: &&threads::Thread| created_ts(b).cmp(&created_ts(a));
+    open.sort_by(sort_newest_first);
+    binned.sort_by(sort_newest_first);
+    resolved.sort_by(sort_newest_first);
+
+    let sections: [(&str, &str, &[&threads::Thread]); 3] = [
+        ("● Open", "DiagnosticInfo", &open),
+        ("✗ Binned", "DiagnosticWarn", &binned),
+        ("✓ Resolved", "Comment", &resolved),
+    ];
+
+    let mut first_section = true;
+    for (label, hl_group, group) in sections {
+        if group.is_empty() {
+            continue;
+        }
+        if !first_section {
+            lines.push(String::new());
+            line_map.push(None);
+        }
+        first_section = false;
+
+        let header_idx = lines.len();
+        lines.push(format!("  {label}"));
+        line_map.push(None);
+        highlights.push((header_idx, hl_group));
+
+        for t in group {
+            let preview = t
+                .messages
+                .first()
+                .map(|m| {
+                    m.text
+                        .chars()
+                        .take(50)
+                        .collect::<String>()
+                        .replace('\n', " ")
+                })
+                .unwrap_or_default();
+            lines.push(format!("    {}:{}  {}", t.file, t.line, preview));
+            line_map.push(Some((t.id.clone(), t.status)));
+        }
+    }
+
+    ThreadListContent {
+        lines,
+        line_map,
+        highlights,
+    }
+}
+
+fn apply_thread_list_highlights(buf: &mut nvim_oxi::api::Buffer, highlights: &[(usize, &str)]) {
+    let ns = api::create_namespace("arbiter-thread-list");
+    for &(line, hl_group) in highlights {
+        let _ = buf.add_highlight(ns, hl_group, line, 0..);
+    }
+}
+
+fn show_thread_queue_status(tid: &str) {
+    if threads::window_thread_id().as_deref() != Some(tid) {
+        return;
+    }
+    let msg = match backend::queue_position(tid) {
+        Some(pos) => format!("queued ({} ahead)", pos + 1),
+        None => "agent thinking...".to_string(),
+    };
+    let _ = threads::append_status(&msg);
 }
 
 fn handle_resolve_thread(review: &mut Review) {
@@ -2231,6 +2572,69 @@ fn handle_resolve_thread(review: &mut Review) {
     }
 }
 
+/// Queues a rule-extraction call at the front of the backend queue
+/// so it runs before the next pending thread reply.
+///
+/// Called after every agent response when `learn_rules` is enabled.
+/// Extracts generalizable conventions from the thread conversation
+/// and appends any new rules to `review.review_rules`.
+fn maybe_queue_extraction(review: &Review, thread_id: &str) {
+    if !review.learn_rules {
+        return;
+    }
+    let Some(t) = review.threads.iter().find(|t| t.id == thread_id) else {
+        return;
+    };
+    let messages: Vec<(String, String)> = t
+        .messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Agent => "agent",
+            };
+            (role.to_string(), m.text.clone())
+        })
+        .collect();
+    let Some(prompt) = prompts::format_extraction_prompt(&messages) else {
+        return;
+    };
+    let tid = thread_id.to_string();
+    backend::send_priority(
+        crate::types::BackendOpts {
+            op: crate::types::BackendOp::NewSession,
+            prompt,
+            ask_mode: true,
+            stream: false,
+            json_schema: None,
+        },
+        Box::new(move |res| {
+            if res.error.is_some() {
+                return;
+            }
+            let new_rules = prompts::parse_extraction_response(&res.text);
+            if new_rules.is_empty() {
+                return;
+            }
+            with_active(|r| {
+                let added: Vec<String> = new_rules
+                    .into_iter()
+                    .filter(|rule| !r.review_rules.contains(rule))
+                    .collect();
+                for rule in &added {
+                    r.review_rules.push(rule.clone());
+                }
+                if !added.is_empty() {
+                    save_file_statuses(r);
+                    if threads::window_thread_id().as_deref() == Some(tid.as_str()) {
+                        let _ = threads::append_learned_rules(&added);
+                    }
+                }
+            });
+        }),
+    );
+}
+
 fn handle_g_q(review: &mut Review) {
     review.show_resolved = !review.show_resolved;
     if let Some(ref path) = review.current_file.clone() {
@@ -2249,12 +2653,19 @@ fn handle_reanchor(review: &mut Review) {
     let Some((path, line, anchor_content, context)) = get_source_loc(review) else {
         return;
     };
-    let prompt = prompts::format_comment_prompt(&path, line, "", &anchor_content, &context);
+    let review_ctx = prompts::ReviewContext {
+        ref_name: &review.ref_name,
+        file_diff: &review.current_diff_text,
+        review_rules: &review.review_rules,
+    };
+    let prompt =
+        prompts::format_comment_prompt(&path, line, "", &anchor_content, &context, &review_ctx);
     let sid2 = sid.clone();
     backend::re_anchor(
         &sid,
         &prompt,
         Box::new(move |res| {
+            let had_error = res.error.is_some();
             with_active(|r| {
                 if let Some(t) = r
                     .threads
@@ -2262,12 +2673,16 @@ fn handle_reanchor(review: &mut Review) {
                     .find(|x| x.session_id.as_deref() == Some(sid2.as_str()))
                 {
                     threads::add_message(t, Role::Agent, &res.text);
+                    let tid = t.id.clone();
                     let state_dir = r.config.state_dir();
                     let ws_hash = state::workspace_hash(Path::new(&r.cwd));
                     state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
                     if let Some(ref p) = r.current_file {
                         let p = p.clone();
                         select_file_impl(r, &p);
+                    }
+                    if !had_error {
+                        maybe_queue_extraction(r, &tid);
                     }
                 }
             });
@@ -2352,7 +2767,7 @@ pub fn close() {
     let ws_hash = state::workspace_hash(Path::new(&review.cwd));
     let ref_name = review.ref_name.clone();
 
-    let mut review_state = state::ReviewState::default();
+    let mut review_state = build_review_state(&review);
     for (p, _, rs) in &review.files {
         review_state
             .files
@@ -2653,7 +3068,7 @@ fn refresh_file_with_diff(
 
     let state_dir = review.config.state_dir();
     let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-    let mut review_state = state::ReviewState::default();
+    let mut review_state = build_review_state(review);
     for (p, _, rs) in &review.files {
         review_state
             .files
@@ -2743,7 +3158,7 @@ pub fn refresh_file_list(review: &mut Review) {
                             r.file_content_hash.remove(&p);
                         }
                         rerender_file_panel(r);
-                        let mut review_state = state::ReviewState::default();
+                        let mut review_state = build_review_state(r);
                         for (p, _, rs) in &r.files {
                             review_state
                                 .files
@@ -2795,6 +3210,35 @@ fn update_diff_winbar(review: &Review, path: &str) {
         .win(review.diff_panel.win.clone())
         .build();
     let _ = api::set_option_value("winbar", title.as_str(), &win_opts);
+}
+
+/// Ensures the diff panel window exists, recreating it if it was closed.
+///
+/// Returns `true` if the diff panel is usable. The buffer persists across
+/// window closes, so only a new window + layout fixup is needed.
+fn ensure_diff_panel(review: &mut Review) -> bool {
+    if review.diff_panel.win.is_valid() {
+        return true;
+    }
+    let saved_win = api::get_current_win();
+    let _ = api::set_current_win(&review.file_panel.win);
+    if api::command("rightbelow vsplit").is_err() {
+        let _ = api::set_current_win(&saved_win);
+        return false;
+    }
+    let mut new_win = api::get_current_win();
+    if new_win.set_buf(&review.diff_panel.buf).is_err() {
+        let _ = api::command("close");
+        let _ = api::set_current_win(&saved_win);
+        return false;
+    }
+    review.diff_panel.win = new_win.clone();
+    let _ = api::set_current_win(&review.file_panel.win);
+    let _ = api::command("vertical resize 40");
+    let win_opts = OptionOpts::builder().win(new_win).build();
+    let _ = api::set_option_value("winbar", " [arbiter] diff", &win_opts);
+    let _ = api::set_current_win(&saved_win);
+    true
 }
 
 /// Navigates to a file, pushing the current file onto `file_history` if changing.
@@ -2874,6 +3318,7 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
         if let Some(tid) = review.pending_thread_open.take() {
             scroll_to_thread_and_open(review, &tid);
         }
+        apply_pending_hunk_nav(review);
         return;
     }
 
@@ -2944,6 +3389,7 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
                 if let Some(tid) = r.pending_thread_open.take() {
                     scroll_to_thread_and_open(r, &tid);
                 }
+                apply_pending_hunk_nav(r);
             });
         }
     });

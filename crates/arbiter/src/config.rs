@@ -28,6 +28,12 @@ pub struct Config {
     pub thread_window: ThreadWindowConfig,
     /// Keybinding overrides.
     pub keymaps: KeymapConfig,
+    /// When true, resolving a thread sends the conversation to the agent
+    /// to extract generalizable coding conventions. Extracted rules are
+    /// injected into future thread prompts so the agent "learns" from
+    /// your feedback over the course of the review. Each extraction
+    /// costs one additional backend call.
+    pub learn_rules: bool,
     /// Extra CLI flags appended to every backend invocation.
     ///
     /// These are passed verbatim after all built-in flags. Useful for
@@ -48,6 +54,7 @@ impl Default for Config {
                 .ok()
                 .and_then(|p| p.to_str().map(String::from)),
             inline_indicators: false,
+            learn_rules: true,
             review: ReviewConfig::default(),
             prompts: PromptConfig::default(),
             thread_window: ThreadWindowConfig::default(),
@@ -307,11 +314,11 @@ impl Default for KeymapConfig {
             comment: "<Leader>ac".to_string(),
             auto_resolve: "<Leader>aA".to_string(),
             open_thread: "<Leader>ao".to_string(),
-            list_threads: "<Leader>aT".to_string(),
-            list_threads_agent: "<Leader>aTa".to_string(),
-            list_threads_user: "<Leader>aTu".to_string(),
-            list_threads_binned: "<Leader>aTb".to_string(),
-            list_threads_open: "<Leader>aTo".to_string(),
+            list_threads: "<Leader>at".to_string(),
+            list_threads_agent: "<Leader>ata".to_string(),
+            list_threads_user: "<Leader>atu".to_string(),
+            list_threads_binned: "<Leader>atb".to_string(),
+            list_threads_open: "<Leader>ato".to_string(),
             resolve_thread: "<Leader>aR".to_string(),
             toggle_resolved: "<Leader>a?".to_string(),
             re_anchor: "<Leader>aP".to_string(),

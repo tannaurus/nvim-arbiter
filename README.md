@@ -28,6 +28,7 @@ Built in Rust with [nvim-oxi](https://github.com/noib3/nvim-oxi), compiled to a 
 - **Session persistence** - Review state, threads, and session history saved to disk
 - **Per-workspace config** - Override the default comparison branch per repository
 - **Backend shim** - Transparent support for both Cursor CLI and Claude Code CLI
+- **Review memory** - The agent learns your coding conventions as you resolve threads, applying them to future feedback in the same review (configurable, costs one extra backend call per resolved thread)
 - **Process cleanup** - Agent CLI processes are killed when Neovim exits; no orphaned processes
 
 ## Workflow
@@ -95,7 +96,7 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 ```lua
 return {
   "tannaurus/nvim-arbiter",
-  tag = "v0.0.3", -- pin to a release tag
+  tag = "v0.0.4", -- pin to a release tag
   build = function()
     require("arbiter.build").download_or_build_binary()
   end,
@@ -190,6 +191,13 @@ require("arbiter").setup({
   -- at lines that have an active thread. Clicking a marker opens the thread.
   inline_indicators = false,
 
+  -- When true, resolving a thread sends the conversation to the agent to
+  -- extract generalizable coding conventions. Extracted rules are injected
+  -- into future thread prompts so the agent learns from your feedback.
+  -- Each extraction costs one additional backend call per agent response.
+  -- Toggle at runtime with :ArbiterToggleRules. View/edit with :ArbiterRules.
+  learn_rules = true,
+
   review = {
     -- Git ref to diff against (e.g. "main", "develop").
     -- The diff uses merge-base so only your branch's changes appear.
@@ -276,11 +284,11 @@ require("arbiter").setup({
     comment = "<Leader>ac",       -- Comment on the line and send to the agent
     auto_resolve = "<Leader>aA",  -- Comment with auto-resolve on agent fix
     open_thread = "<Leader>ao",   -- Open thread conversation at cursor
-    list_threads = "<Leader>aT",  -- List all threads (quickfix)
-    list_threads_agent = "<Leader>aTa", -- List agent-created threads
-    list_threads_user = "<Leader>aTu",  -- List user-created threads
-    list_threads_binned = "<Leader>aTb", -- List resolved threads
-    list_threads_open = "<Leader>aTo",   -- List open threads
+    list_threads = "<Leader>at",  -- Thread list popup (grouped by status)
+    list_threads_agent = "<Leader>ata", -- Thread list (agent threads only)
+    list_threads_user = "<Leader>atu",  -- Thread list (user threads only)
+    list_threads_binned = "<Leader>atb", -- Thread list (binned only)
+    list_threads_open = "<Leader>ato",   -- Thread list (open only)
     resolve_thread = "<Leader>aR",       -- Resolve/reopen thread at cursor
     toggle_resolved = "<Leader>a?",      -- Toggle display of resolved threads
     re_anchor = "<Leader>aP",     -- Re-anchor thread to current cursor line
@@ -338,7 +346,7 @@ When arbiter sends feedback to the agent, the agent may need to run shell comman
 ```json
 {
   "enabledTools": ["shell"],
-  "allowedCommands": ["git", "cargo fmt", "rustfmt"]
+  "allowedCommands": ["git", "cargo fmt", "cargo clippy", "rustfmt"]
 }
 ```
 
@@ -370,6 +378,8 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterOpenThread <file> <line>` | Open the thread at the given file and line number. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
 | `:ArbiterSummary` | Show review summary popup (file/thread counts). |
+| `:ArbiterRules` | Open an editable popup with the current review rules. `:w` saves, `q` closes. |
+| `:ArbiterToggleRules` | Toggle automatic rule extraction on thread resolution. |
 
 ## Keybindings
 
@@ -401,11 +411,11 @@ All keybindings are active in the review workbench tabpage and are fully configu
 | `<Leader>ac` | Add a comment and send to the agent. Opens the thread window with streaming response. |
 | `<Leader>aA` | Add a comment with auto-resolve (auto-approves once the agent applies the change). |
 | `<Leader>ao` | Open the thread conversation at the cursor. |
-| `<Leader>aT` | List all threads in a quickfix list. |
-| `<Leader>aTa` | List agent-created threads only. |
-| `<Leader>aTu` | List user-created threads only. |
-| `<Leader>aTb` | List resolved (binned) threads only. |
-| `<Leader>aTo` | List open (unresolved) threads only. |
+| `<Leader>at` | Open thread list popup (grouped by status). |
+| `<Leader>ata` | Open thread list filtered to agent-created threads. |
+| `<Leader>atu` | Open thread list filtered to user-created threads. |
+| `<Leader>atb` | Open thread list filtered to binned threads. |
+| `<Leader>ato` | Open thread list filtered to open threads. |
 | `<Leader>aR` | Resolve the thread at the cursor. |
 | `<Leader>a?` | Toggle display of resolved threads. |
 | `<Leader>aP` | Re-anchor a thread to the current cursor position. |
@@ -427,15 +437,15 @@ All keybindings are active in the review workbench tabpage and are fully configu
 |-----|--------|
 | `<CR>` | Select file, or toggle directory collapse. |
 
-### Thread quickfix list
+### Thread list popup
 
-When a thread list is open (via `<Leader>aT` and variants):
+When the thread list popup is open (via `<Leader>at` and variants):
 
 | Key | Action |
 |-----|--------|
-| `<CR>` | Open the thread detail window and navigate the diff panel to that file/line. |
-| `dd` | Remove the entry from the quickfix list. |
-| `gf` | Jump to the source file at the thread's line. |
+| `<CR>` | Navigate to the thread's file/line and open the thread window. |
+| `dd` | Resolve the thread (Open/Binned) or permanently delete it (Resolved). |
+| `q` / `Esc` | Close the popup. |
 
 ### Comment input float
 

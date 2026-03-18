@@ -36,6 +36,7 @@ static QUEUE: Mutex<VecDeque<QueueItem>> = Mutex::new(VecDeque::new());
 static PROCESSING: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static INFLIGHT_TAG: Mutex<Option<String>> = Mutex::new(None);
+static INFLIGHT_STREAM: Mutex<String> = Mutex::new(String::new());
 
 /// Drop guard that calls `process_next()` on drop.
 ///
@@ -57,6 +58,18 @@ pub(super) fn push(item: QueueItem) {
     }
 }
 
+/// Pushes an item to the front of the queue so it runs next.
+///
+/// Used for rule extraction after agent responses - the extraction
+/// must complete before the next queued thread reply starts.
+pub(super) fn push_front(item: QueueItem) {
+    // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
+    QUEUE.lock().expect("queue lock").push_front(item);
+    if !PROCESSING.swap(true, Ordering::SeqCst) {
+        process_next();
+    }
+}
+
 /// Processes the next item. Called by push and by DrainGuard.
 fn process_next() {
     // Pop and set the in-flight tag atomically so cancel_tagged always
@@ -68,6 +81,7 @@ fn process_next() {
         // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
         *INFLIGHT_TAG.lock().expect("inflight_tag lock") =
             item.as_ref().and_then(|i| i.tag.clone());
+        INFLIGHT_STREAM.lock().expect("stream lock").clear();
         item
     };
     match item {
@@ -130,12 +144,33 @@ pub(super) fn inflight_tag() -> Option<String> {
     INFLIGHT_TAG.lock().expect("inflight_tag lock").clone()
 }
 
+/// Appends a streaming chunk to the in-flight accumulator.
+pub(super) fn append_inflight_stream(chunk: &str) {
+    INFLIGHT_STREAM.lock().expect("stream lock").push_str(chunk);
+}
+
+/// Returns the accumulated streaming text for the in-flight request.
+pub(super) fn inflight_stream() -> String {
+    INFLIGHT_STREAM.lock().expect("stream lock").clone()
+}
+
+/// Returns the 0-based queue position of the item with the given tag,
+/// or `None` if the tag is not in the queue (it may be in-flight or absent).
+pub(super) fn queue_position(tag: &str) -> Option<usize> {
+    QUEUE
+        .lock()
+        .expect("queue lock")
+        .iter()
+        .position(|item| item.tag.as_deref() == Some(tag))
+}
+
 /// Cancels all pending items and causes in-flight callbacks to no-op.
 pub(super) fn cancel_all() {
     GENERATION.fetch_add(1, Ordering::SeqCst);
     // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
     QUEUE.lock().expect("queue lock").clear();
     *INFLIGHT_TAG.lock().expect("inflight_tag lock") = None;
+    INFLIGHT_STREAM.lock().expect("stream lock").clear();
     PROCESSING.store(false, Ordering::SeqCst);
     crate::activity::set_busy(false);
 }

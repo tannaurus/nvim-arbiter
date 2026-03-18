@@ -17,6 +17,9 @@ use std::path::Path;
 pub struct ReviewState {
     /// File path to file state.
     pub files: HashMap<String, FileState>,
+    /// Generalizable coding conventions extracted from resolved threads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_rules: Vec<String>,
 }
 
 /// State for a single file in the review.
@@ -246,6 +249,25 @@ mod tests {
         let f = loaded.files.get("src/main.rs").unwrap();
         assert_eq!(f.status, ReviewStatus::Approved);
         assert_eq!(f.content_hash, "abc123");
+    }
+
+    #[test]
+    fn save_load_review_rules_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let state = ReviewState {
+            review_rules: vec![
+                "Prefer map_err over match".to_string(),
+                "Use constants".to_string(),
+            ],
+            ..Default::default()
+        };
+        save_review(dir, &ws, "main", &state);
+        let loaded = load_review(dir, &ws, "main");
+        assert_eq!(loaded.review_rules.len(), 2);
+        assert_eq!(loaded.review_rules[0], "Prefer map_err over match");
+        assert_eq!(loaded.review_rules[1], "Use constants");
     }
 
     #[test]

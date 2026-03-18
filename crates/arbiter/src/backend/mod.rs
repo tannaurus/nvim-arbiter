@@ -64,6 +64,19 @@ pub fn send(opts: BackendOpts, on_stream: Option<OnStream>, callback: OnComplete
     send_tagged(opts, on_stream, callback, None);
 }
 
+/// Enqueues a CLI call at the front of the queue so it runs next.
+///
+/// Used for rule extraction after agent responses. The extraction
+/// blocks subsequent queued items until it completes.
+pub fn send_priority(opts: BackendOpts, callback: OnComplete) {
+    queue::push_front(queue::QueueItem {
+        opts,
+        on_stream: None,
+        callback,
+        tag: None,
+    });
+}
+
 /// Enqueues a CLI call with an optional tag for scoped cancellation.
 pub fn send_tagged(
     opts: BackendOpts,
@@ -109,9 +122,28 @@ pub fn inflight_tag() -> Option<String> {
     queue::inflight_tag()
 }
 
+/// Appends a streaming chunk to the in-flight accumulator.
+///
+/// Called from `on_stream` callbacks so that `open_active_thread` can
+/// display text that arrived before the thread window was opened.
+pub fn append_inflight_stream(chunk: &str) {
+    queue::append_inflight_stream(chunk);
+}
+
+/// Returns the accumulated streaming text for the in-flight request.
+pub fn inflight_stream() -> String {
+    queue::inflight_stream()
+}
+
 /// Returns the number of requests waiting in the queue (excludes in-flight).
 pub fn pending_count() -> usize {
     queue::pending_count()
+}
+
+/// Returns the 0-based queue position of the request tagged with `tag`,
+/// or `None` if it is not waiting (already in-flight or absent).
+pub fn queue_position(tag: &str) -> Option<usize> {
+    queue::queue_position(tag)
 }
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);

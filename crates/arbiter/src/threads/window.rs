@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 const SEPARATOR: &str = "  ────────────────────────────────";
+const STATUS_PREFIX: &str = "  ⏳ ";
 
 thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
@@ -244,6 +245,7 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
         let Some(ref mut buf) = *guard else {
             return Ok(());
         };
+        clear_status(buf)?;
         let line_count = buf.line_count()?;
         let all_lines: Vec<String> = buf
             .get_lines(0..line_count, false)?
@@ -273,6 +275,75 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
     })
 }
 
+/// Appends a status line (e.g. "thinking..." or "queued") to the thread panel.
+///
+/// If a status line already exists it is replaced. Automatically cleared
+/// when the first streaming chunk arrives via `append_streaming`.
+pub fn append_status(message: &str) -> nvim_oxi::Result<()> {
+    BUFFER.with(|c| {
+        let mut guard = c.borrow_mut();
+        let Some(ref mut buf) = *guard else {
+            return Ok(());
+        };
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+
+        let line_count = buf.line_count()?;
+        let status_text = format!("{STATUS_PREFIX}{message}");
+
+        let existing_status = if line_count > 0 {
+            buf.get_lines((line_count - 1)..line_count, false)?
+                .next()
+                .map(|s| s.to_string_lossy().to_string())
+                .filter(|s| s.starts_with(STATUS_PREFIX))
+                .is_some()
+        } else {
+            false
+        };
+
+        if existing_status {
+            buf.set_lines((line_count - 1)..line_count, false, [status_text.as_str()])?;
+        } else {
+            buf.set_lines(line_count..line_count, false, [status_text.as_str()])?;
+        }
+
+        api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        let status_line = if existing_status {
+            line_count - 1
+        } else {
+            line_count
+        };
+        let _ = buf.add_highlight(ns, "NonText", status_line, 0..);
+
+        scroll_to_bottom(buf);
+        Ok(())
+    })
+}
+
+/// Removes the trailing status line if present. Returns the updated line count.
+fn clear_status(buf: &mut Buffer) -> nvim_oxi::Result<usize> {
+    let line_count = buf.line_count()?;
+    if line_count == 0 {
+        return Ok(0);
+    }
+    let has_status = buf
+        .get_lines((line_count - 1)..line_count, false)?
+        .next()
+        .map(|s| s.to_string_lossy().starts_with(STATUS_PREFIX))
+        .unwrap_or(false);
+    if has_status {
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+        buf.set_lines((line_count - 1)..line_count, false, Vec::<&str>::new())?;
+        api::set_option_value("modifiable", false, &buf_opts)?;
+        Ok(line_count - 1)
+    } else {
+        Ok(line_count)
+    }
+}
+
 /// Appends streaming text from the agent.
 ///
 /// On the first chunk (when the last author line is not `agent`), inserts
@@ -286,6 +357,9 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
         let Some(ref mut buf) = *guard else {
             return Ok(());
         };
+
+        clear_status(buf)?;
+
         let line_count = buf.line_count()?;
         let all_lines: Vec<String> = buf
             .get_lines(0..line_count, false)?
@@ -346,6 +420,56 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
         }
 
         api::set_option_value("modifiable", false, &buf_opts)?;
+
+        scroll_to_bottom(buf);
+
+        Ok(())
+    })
+}
+
+/// Appends a "rules learned" block to the thread panel showing
+/// conventions that were extracted from this thread's conversation.
+pub fn append_learned_rules(rules: &[String]) -> nvim_oxi::Result<()> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+    BUFFER.with(|c| {
+        let mut guard = c.borrow_mut();
+        let Some(ref mut buf) = *guard else {
+            return Ok(());
+        };
+        let line_count = buf.line_count()?;
+        let mut new_lines: Vec<String> = Vec::new();
+        if line_count > 0 {
+            new_lines.push(SEPARATOR.to_string());
+            new_lines.push(String::new());
+        }
+        let header_offset = new_lines.len();
+        new_lines.push("✦ rules learned".to_string());
+        for rule in rules {
+            new_lines.push(format!("  • {rule}"));
+        }
+        new_lines.push(String::new());
+
+        let refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+        buf.set_lines(line_count..line_count, false, refs)?;
+        api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        if line_count > 0 {
+            let _ = buf.add_highlight(ns, "NonText", line_count, 0..);
+        }
+        let _ = buf.add_highlight(ns, "ArbiterRuleLearned", line_count + header_offset, 0..);
+        for i in 0..rules.len() {
+            let _ = buf.add_highlight(
+                ns,
+                "ArbiterRuleLearned",
+                line_count + header_offset + 1 + i,
+                0..,
+            );
+        }
 
         scroll_to_bottom(buf);
 
