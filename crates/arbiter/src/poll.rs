@@ -26,7 +26,7 @@ thread_local! {
 /// Starts both poll timers. Uses config for intervals.
 ///
 /// Called from `review::open()`.
-pub fn start(_cwd: &str) {
+pub(crate) fn start(_cwd: &str) {
     let cfg = config::get();
     let poll_ms = cfg.review.poll_interval;
     let list_ms = cfg.review.file_list_interval;
@@ -83,7 +83,7 @@ pub fn start(_cwd: &str) {
 /// Stops and drops both timers.
 ///
 /// Called from `review::close()`.
-pub fn stop() {
+pub(crate) fn stop() {
     FILE_TIMER.with(|cell| {
         let mut opt = cell.borrow_mut();
         if let Some(mut h) = opt.take() {
@@ -104,15 +104,18 @@ pub fn stop() {
 /// Sets the current file path for mtime polling.
 ///
 /// Called when the user selects a different file.
-pub fn set_target(file_path: Option<&str>) {
+pub(crate) fn set_target(file_path: Option<&str>) {
     TARGET_PATH.with(|c| {
         *c.borrow_mut() = file_path.map(String::from);
     });
 }
 
 fn on_file_tick() {
+    if review::with_active(|r| r.revision_view.is_some()).unwrap_or(false) {
+        return;
+    }
     let path = TARGET_PATH.with(|c| c.borrow().clone());
-    let Some(ref path) = path else {
+    let Some(path) = path.as_deref() else {
         return;
     };
 

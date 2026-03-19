@@ -12,7 +12,7 @@ use std::process::Command;
 /// Contains stdout, stderr, and exit code. On binary-not-found or
 /// spawn failure, exit_code is -1 and stderr describes the error.
 #[derive(Debug, Clone)]
-pub struct GitResult {
+pub(crate) struct GitResult {
     /// Standard output.
     pub stdout: String,
     /// Standard error.
@@ -33,7 +33,7 @@ impl GitResult {
 /// The callback is invoked on the main Neovim thread via `dispatch::schedule`.
 /// If git is not found on PATH, the callback receives a result with
 /// exit_code -1 and a descriptive stderr message.
-pub fn run<F>(cwd: &str, args: &[&str], callback: F)
+pub(crate) fn run<F>(cwd: &str, args: &[&str], callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -74,9 +74,14 @@ fn run_git_sync(cwd: &str, args: &[String]) -> GitResult {
 /// Returns the merge-base commit hash, or the ref itself if merge-base
 /// fails (e.g. no common ancestor). This ensures diffs only show changes
 /// on the current branch, matching GitHub/GitLab PR behavior.
+///
+/// When `ref_name` is empty (working tree mode), returns `"HEAD"` so diffs
+/// compare against the last commit rather than the index. This keeps
+/// staged hunks visible in the diff panel, allowing the user to unstage
+/// them individually.
 fn resolve_merge_base(cwd: &str, ref_name: &str) -> String {
     if ref_name.is_empty() {
-        return String::new();
+        return "HEAD".to_string();
     }
     let result = run_git_sync(
         cwd,
@@ -96,7 +101,7 @@ fn resolve_merge_base(cwd: &str, ref_name: &str) -> String {
 /// Runs `git diff <merge-base> -- <file>` and invokes the callback with the unified diff output.
 ///
 /// Uses the merge-base of HEAD and the ref so only branch changes appear.
-pub fn diff<F>(cwd: &str, ref_name: &str, file: &str, callback: F)
+pub(crate) fn diff<F>(cwd: &str, ref_name: &str, file: &str, callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -121,7 +126,7 @@ where
 /// Runs `git diff --name-status <merge-base>` and invokes the callback with the file list.
 ///
 /// Uses the merge-base of HEAD and the ref so only branch changes appear.
-pub fn diff_names<F>(cwd: &str, ref_name: &str, callback: F)
+pub(crate) fn diff_names<F>(cwd: &str, ref_name: &str, callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -143,7 +148,7 @@ where
 }
 
 /// Runs `git ls-files --others --exclude-standard` and invokes the callback with untracked paths.
-pub fn untracked<F>(cwd: &str, callback: F)
+pub(crate) fn untracked<F>(cwd: &str, callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -157,7 +162,7 @@ where
 /// Runs `git show <merge-base>:<file>` and invokes the callback with file content at the base.
 ///
 /// Uses the merge-base so side-by-side shows the file as it was when the branch diverged.
-pub fn show<F>(cwd: &str, ref_name: &str, file: &str, callback: F)
+pub(crate) fn show<F>(cwd: &str, ref_name: &str, file: &str, callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -176,7 +181,7 @@ where
 /// Runs `git diff <merge-base>` (full repo) and invokes the callback with the unified diff output.
 ///
 /// Uses the merge-base so only branch changes appear.
-pub fn diff_full<F>(cwd: &str, ref_name: &str, callback: F)
+pub(crate) fn diff_full<F>(cwd: &str, ref_name: &str, callback: F)
 where
     F: FnOnce(GitResult) + Send + 'static,
 {
@@ -197,10 +202,25 @@ where
     });
 }
 
+/// Stages a patch in the git index via `git apply --cached`.
+///
+/// Runs synchronously; the patch is small so blocking is negligible.
+/// Returns the git result so the caller can check for errors.
+pub(crate) fn stage_patch(cwd: &str, patch: &str) -> GitResult {
+    run_git_with_stdin(cwd, &["apply", "--cached"], patch)
+}
+
+/// Unstages a previously staged patch via `git apply --cached --reverse`.
+///
+/// Runs synchronously. Returns the git result.
+pub(crate) fn unstage_patch(cwd: &str, patch: &str) -> GitResult {
+    run_git_with_stdin(cwd, &["apply", "--cached", "--reverse"], patch)
+}
+
 /// Returns the modification time of a file as epoch seconds, or None if missing.
 ///
 /// Synchronous; uses `std::fs::metadata`. Safe to call from any thread.
-pub fn file_mtime(path: &str) -> Option<i64> {
+pub(crate) fn file_mtime(path: &str) -> Option<i64> {
     std::fs::metadata(path)
         .ok()?
         .modified()
@@ -208,6 +228,47 @@ pub fn file_mtime(path: &str) -> Option<i64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .map(|d| d.as_secs() as i64)
+}
+
+fn run_git_with_stdin(cwd: &str, args: &[&str], stdin_data: &str) -> GitResult {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = match Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return GitResult {
+                stdout: String::new(),
+                stderr: format!("git: {e}"),
+                exit_code: -1,
+            };
+        }
+    };
+
+    if let Some(pipe) = child.stdin.as_mut() {
+        let _ = pipe.write_all(stdin_data.as_bytes());
+    }
+    drop(child.stdin.take());
+
+    match child.wait_with_output() {
+        Ok(output) => GitResult {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(-1),
+        },
+        Err(e) => GitResult {
+            stdout: String::new(),
+            stderr: format!("git wait: {e}"),
+            exit_code: -1,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -267,6 +328,182 @@ mod tests {
         assert!(result.success());
         assert!(result.stdout.trim().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn init_repo(dir: &std::path::Path) {
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .expect("git config email");
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .expect("git config name");
+    }
+
+    fn commit_all(dir: &std::path::Path, msg: &str) {
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .output()
+            .expect("git add");
+        Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(dir)
+            .output()
+            .expect("git commit");
+    }
+
+    fn staged_diff(dir: &std::path::Path) -> String {
+        let out = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(dir)
+            .output()
+            .expect("git diff --cached");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    fn working_diff(dir: &std::path::Path, file: &str) -> String {
+        let out = Command::new("git")
+            .args(["diff", "--", file])
+            .current_dir(dir)
+            .output()
+            .expect("git diff");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[test]
+    fn stage_patch_applies_change_to_index() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "line1\nline2\nline3\n").expect("write");
+        commit_all(dir, "initial");
+        std::fs::write(dir.join("a.txt"), "line1\nmodified\nline3\n").expect("write");
+
+        let diff = working_diff(dir, "a.txt");
+        let hunks = crate::diff::parse_hunks(&diff);
+        assert_eq!(hunks.len(), 1);
+
+        let patch = crate::diff::build_hunk_patch(&diff, &hunks[0].content_hash).unwrap();
+        let result = stage_patch(dir.to_str().unwrap(), &patch);
+        assert!(result.success(), "stage_patch failed: {}", result.stderr);
+
+        let cached = staged_diff(dir);
+        assert!(cached.contains("a.txt"), "a.txt should be staged: {cached}");
+    }
+
+    #[test]
+    fn unstage_patch_reverses_staged_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "line1\nline2\nline3\n").expect("write");
+        commit_all(dir, "initial");
+        std::fs::write(dir.join("a.txt"), "line1\nmodified\nline3\n").expect("write");
+
+        let diff = working_diff(dir, "a.txt");
+        let hunks = crate::diff::parse_hunks(&diff);
+        let patch = crate::diff::build_hunk_patch(&diff, &hunks[0].content_hash).unwrap();
+        let r = stage_patch(dir.to_str().unwrap(), &patch);
+        assert!(r.success());
+
+        let r = unstage_patch(dir.to_str().unwrap(), &patch);
+        assert!(r.success(), "unstage_patch failed: {}", r.stderr);
+
+        let cached = staged_diff(dir);
+        assert!(
+            cached.trim().is_empty(),
+            "index should be clean after unstage: {cached}"
+        );
+    }
+
+    #[test]
+    fn stage_patch_invalid_patch_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+        std::fs::write(dir.join("a.txt"), "x\n").expect("write");
+        commit_all(dir, "initial");
+
+        let result = stage_patch(dir.to_str().unwrap(), "not a valid patch\n");
+        assert!(!result.success());
+    }
+
+    #[test]
+    fn unstage_patch_without_prior_stage_fails() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "line1\nline2\n").expect("write");
+        commit_all(dir, "initial");
+        std::fs::write(dir.join("a.txt"), "line1\nchanged\n").expect("write");
+
+        let diff = working_diff(dir, "a.txt");
+        let hunks = crate::diff::parse_hunks(&diff);
+        let patch = crate::diff::build_hunk_patch(&diff, &hunks[0].content_hash).unwrap();
+
+        let result = unstage_patch(dir.to_str().unwrap(), &patch);
+        assert!(!result.success());
+    }
+
+    #[test]
+    fn stage_patch_multi_hunk_stages_single() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        let original = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\n";
+        let modified = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\nP\n";
+        std::fs::write(dir.join("b.txt"), original).expect("write");
+        commit_all(dir, "initial");
+        std::fs::write(dir.join("b.txt"), modified).expect("write");
+
+        let diff = working_diff(dir, "b.txt");
+        let hunks = crate::diff::parse_hunks(&diff);
+        assert!(
+            hunks.len() >= 2,
+            "expected at least 2 hunks, got {}",
+            hunks.len()
+        );
+
+        let patch = crate::diff::build_hunk_patch(&diff, &hunks[0].content_hash).unwrap();
+        let r = stage_patch(dir.to_str().unwrap(), &patch);
+        assert!(r.success(), "stage first hunk failed: {}", r.stderr);
+
+        let cached_diff = Command::new("git")
+            .args(["diff", "--cached"])
+            .current_dir(dir)
+            .output()
+            .expect("git diff --cached");
+        let cached_text = String::from_utf8_lossy(&cached_diff.stdout);
+
+        let remaining_diff = working_diff(dir, "b.txt");
+        let remaining_hunks = crate::diff::parse_hunks(&remaining_diff);
+        assert!(
+            !remaining_hunks.is_empty(),
+            "second hunk should still be unstaged"
+        );
+        assert!(
+            cached_text.contains("b.txt"),
+            "b.txt should appear in staged diff"
+        );
+    }
+
+    #[test]
+    fn run_git_with_stdin_spawn_failure() {
+        let result = run_git_with_stdin("/nonexistent/dir/12345", &["apply", "--cached"], "x");
+        assert!(!result.success());
     }
 
     #[test]

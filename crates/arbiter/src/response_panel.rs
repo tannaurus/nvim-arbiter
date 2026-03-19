@@ -26,7 +26,7 @@ const FLOAT_HEIGHT: u32 = 20;
 /// When a review workbench is active, creates a horizontal split at the bottom.
 /// When no workbench, creates a centered float. Reuses existing buffer when open.
 /// If already open, adds a separator line for the new response.
-pub fn open_or_reuse(title: &str) -> nvim_oxi::Result<()> {
+pub(crate) fn open_or_reuse(title: &str) -> nvim_oxi::Result<()> {
     if review::is_active() {
         if panel_is_open() {
             let _ = append(&format!("\n── {title} ──\n"));
@@ -133,12 +133,12 @@ fn open_float(title: &str) -> nvim_oxi::Result<()> {
 }
 
 /// Appends text to the active response panel or float.
-pub fn append(text: &str) -> nvim_oxi::Result<()> {
+pub(crate) fn append(text: &str) -> nvim_oxi::Result<()> {
     let mut appended = false;
 
     PANEL_BUF.with(|c| {
         let mut guard = c.borrow_mut();
-        if let Some(ref mut buf) = *guard {
+        if let Some(buf) = guard.as_mut() {
             let _ = api::set_option_value(
                 "modifiable",
                 true,
@@ -161,7 +161,7 @@ pub fn append(text: &str) -> nvim_oxi::Result<()> {
     if !appended {
         FLOAT_BUF.with(|c| {
             let mut guard = c.borrow_mut();
-            if let Some(ref mut buf) = *guard {
+            if let Some(buf) = guard.as_mut() {
                 let _ = api::set_option_value(
                     "modifiable",
                     true,
@@ -185,10 +185,10 @@ pub fn append(text: &str) -> nvim_oxi::Result<()> {
 }
 
 /// Appends streaming text to the last line of the active response.
-pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
+pub(crate) fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
     PANEL_BUF.with(|c| {
         let mut guard = c.borrow_mut();
-        if let Some(ref mut buf) = *guard {
+        if let Some(buf) = guard.as_mut() {
             let _ = api::set_option_value(
                 "modifiable",
                 true,
@@ -214,7 +214,7 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
         drop(guard);
         FLOAT_BUF.with(|c| {
             let mut guard = c.borrow_mut();
-            if let Some(ref mut buf) = *guard {
+            if let Some(buf) = guard.as_mut() {
                 let _ = api::set_option_value(
                     "modifiable",
                     true,
@@ -266,11 +266,11 @@ fn close_float() {
 }
 
 /// Returns true if the response panel (split) is open.
-pub fn panel_is_open() -> bool {
+pub(crate) fn panel_is_open() -> bool {
     PANEL_WIN.with(|c| c.borrow().is_some())
 }
 
 /// Returns true if the response float is open.
-pub fn float_is_open() -> bool {
+pub(crate) fn float_is_open() -> bool {
     FLOAT_WIN.with(|c| c.borrow().is_some())
 }

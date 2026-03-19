@@ -11,17 +11,21 @@ use chrono::Local;
 use nvim_oxi::api::opts::{CreateAutocmdOpts, OptionOpts, SetKeymapOpts};
 use nvim_oxi::api::types::Mode;
 use nvim_oxi::api::{self, Buffer, Window};
+use nvim_oxi::IntoResult;
 use std::cell::RefCell;
 use std::sync::Arc;
 
 const SEPARATOR: &str = "  ────────────────────────────────";
 const STATUS_PREFIX: &str = "  ⏳ ";
+const INTERRUPTED_PREFIX: &str = "  ⚠ interrupted  ";
+const REVISION_PREFIX: &str = "  ◆ ";
 
 thread_local! {
     static WINDOW: RefCell<Option<Window>> = const { RefCell::new(None) };
     static BUFFER: RefCell<Option<Buffer>> = const { RefCell::new(None) };
     static THREAD_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static ON_CLOSE: RefCell<Option<OnClose>> = const { RefCell::new(None) };
+    static ON_REVISION: RefCell<Option<OnRevisionSelected>> = const { RefCell::new(None) };
 }
 
 /// Callback invoked when the user requests to reply (presses `<CR>`).
@@ -29,6 +33,10 @@ pub type OnReplyRequested = Box<dyn Fn() + Send + Sync>;
 
 /// Callback invoked when the thread panel is closed via `q`.
 pub type OnClose = Arc<dyn Fn() + Send + Sync>;
+
+/// Callback invoked when the user presses `<CR>` on a revision summary line.
+/// Receives the 1-based revision index.
+pub type OnRevisionSelected = Arc<dyn Fn(u32) + Send + Sync>;
 
 fn format_ts(ts: i64) -> String {
     if ts == 0 {
@@ -57,6 +65,7 @@ pub fn open(
     messages: &[Message],
     on_reply: OnReplyRequested,
     on_close: Option<OnClose>,
+    on_revision: Option<OnRevisionSelected>,
 ) -> nvim_oxi::Result<()> {
     let ea_was_on =
         api::get_option_value::<bool>("equalalways", &OptionOpts::default()).unwrap_or(true);
@@ -141,7 +150,15 @@ pub fn open(
     let on_reply_cell = Arc::new(on_reply);
     let opts = SetKeymapOpts::builder()
         .callback(move |_| {
-            on_reply_cell();
+            if let Some(rev_idx) = revision_at_cursor() {
+                ON_REVISION.with(|c| {
+                    if let Some(cb) = c.borrow().as_ref() {
+                        cb(rev_idx);
+                    }
+                });
+            } else {
+                on_reply_cell();
+            }
         })
         .noremap(true)
         .silent(true)
@@ -162,6 +179,7 @@ pub fn open(
     BUFFER.with(|c| *c.borrow_mut() = Some(buf));
     THREAD_ID.with(|c| *c.borrow_mut() = Some(thread_id.to_string()));
     ON_CLOSE.with(|c| *c.borrow_mut() = on_close);
+    ON_REVISION.with(|c| *c.borrow_mut() = on_revision);
 
     let _ = api::create_autocmd(
         ["BufWipeout"],
@@ -173,6 +191,7 @@ pub fn open(
                     BUFFER.with(|c| c.borrow_mut().take());
                     let cb = ON_CLOSE.with(|c| c.borrow_mut().take());
                     THREAD_ID.with(|c| c.borrow_mut().take());
+                    ON_REVISION.with(|c| c.borrow_mut().take());
                     if let Some(cb) = cb {
                         cb();
                     }
@@ -195,7 +214,7 @@ pub fn open(
 pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
-        let Some(ref mut buf) = *guard else {
+        let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
         let (author, hl) = match role {
@@ -242,7 +261,7 @@ pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
 pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
-        let Some(ref mut buf) = *guard else {
+        let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
         clear_status(buf)?;
@@ -282,7 +301,7 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
 pub fn append_status(message: &str) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
-        let Some(ref mut buf) = *guard else {
+        let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
         let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
@@ -322,6 +341,33 @@ pub fn append_status(message: &str) -> nvim_oxi::Result<()> {
     })
 }
 
+/// Appends an "interrupted" line with a timestamp to the thread panel.
+///
+/// Replaces any existing status line. Used when a request is cancelled
+/// (via the cancel keymap or by a new reply superseding an in-flight request).
+pub fn append_interrupted() -> nvim_oxi::Result<()> {
+    BUFFER.with(|c| {
+        let mut guard = c.borrow_mut();
+        let Some(buf) = guard.as_mut() else {
+            return Ok(());
+        };
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+
+        let line_count = clear_status(buf)?;
+        let text = format!("{INTERRUPTED_PREFIX}{}", format_now());
+        buf.set_lines(line_count..line_count, false, [text.as_str()])?;
+
+        api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        let _ = buf.add_highlight(ns, "WarningMsg", line_count, 0..);
+
+        scroll_to_bottom(buf);
+        Ok(())
+    })
+}
+
 /// Removes the trailing status line if present. Returns the updated line count.
 fn clear_status(buf: &mut Buffer) -> nvim_oxi::Result<usize> {
     let line_count = buf.line_count()?;
@@ -354,7 +400,7 @@ fn clear_status(buf: &mut Buffer) -> nvim_oxi::Result<usize> {
 pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
-        let Some(ref mut buf) = *guard else {
+        let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
 
@@ -427,6 +473,69 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
     })
 }
 
+/// Appends a revision summary block to the thread panel.
+///
+/// Shows the revision number, file count, and per-file line stats.
+/// Summary lines use a distinct highlight group and are non-message
+/// metadata rendered from revision data.
+pub fn append_revision_summary(
+    rev_index: u32,
+    file_count: usize,
+    stats: &[(String, usize, usize)],
+) -> nvim_oxi::Result<()> {
+    BUFFER.with(|c| {
+        let mut guard = c.borrow_mut();
+        let Some(buf) = guard.as_mut() else {
+            return Ok(());
+        };
+        let line_count = buf.line_count()?;
+        let mut new_lines: Vec<String> = Vec::new();
+        if line_count > 0 {
+            new_lines.push(SEPARATOR.to_string());
+            new_lines.push(String::new());
+        }
+        let total_added: usize = stats.iter().map(|(_, a, _)| a).sum();
+        let total_removed: usize = stats.iter().map(|(_, _, r)| r).sum();
+        let header_offset = new_lines.len();
+        new_lines.push(format!(
+            "{REVISION_PREFIX}revision {rev_index} - {file_count} file{} changed (+{total_added} -{total_removed})",
+            if file_count == 1 { "" } else { "s" }
+        ));
+        for (path, added, removed) in stats {
+            new_lines.push(format!("    {path}  (+{added} -{removed})"));
+        }
+        new_lines.push(String::new());
+
+        let refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+        buf.set_lines(line_count..line_count, false, refs)?;
+        api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        if line_count > 0 {
+            let _ = buf.add_highlight(ns, "NonText", line_count, 0..);
+        }
+        let _ = buf.add_highlight(
+            ns,
+            "ArbiterRevisionSummary",
+            line_count + header_offset,
+            0..,
+        );
+        for i in 0..stats.len() {
+            let _ = buf.add_highlight(
+                ns,
+                "ArbiterRevisionFile",
+                line_count + header_offset + 1 + i,
+                0..,
+            );
+        }
+
+        scroll_to_bottom(buf);
+        Ok(())
+    })
+}
+
 /// Appends a "rules learned" block to the thread panel showing
 /// conventions that were extracted from this thread's conversation.
 pub fn append_learned_rules(rules: &[String]) -> nvim_oxi::Result<()> {
@@ -435,7 +544,7 @@ pub fn append_learned_rules(rules: &[String]) -> nvim_oxi::Result<()> {
     }
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
-        let Some(ref mut buf) = *guard else {
+        let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
         let line_count = buf.line_count()?;
@@ -479,7 +588,7 @@ pub fn append_learned_rules(rules: &[String]) -> nvim_oxi::Result<()> {
 
 fn scroll_to_bottom(buf: &Buffer) {
     WINDOW.with(|w| {
-        if let Some(ref mut win) = *w.borrow_mut() {
+        if let Some(win) = w.borrow_mut().as_mut() {
             if let Ok(cnt) = buf.line_count() {
                 let _ = win.set_cursor(cnt, 0);
             }
@@ -504,6 +613,7 @@ pub fn close() {
     THREAD_ID.with(|c| {
         c.borrow_mut().take();
     });
+    ON_REVISION.with(|c| c.borrow_mut().take());
     if let Some(cb) = cb {
         cb();
     }
@@ -517,4 +627,34 @@ pub fn is_open() -> bool {
 /// Returns the thread ID currently displayed in the panel, if any.
 pub fn current_thread_id() -> Option<String> {
     THREAD_ID.with(|c| c.borrow().clone())
+}
+
+/// Returns the revision index if the cursor is on a revision summary line.
+///
+/// Parses "  ◆ revision N - ..." to extract N.
+pub fn revision_at_cursor() -> Option<u32> {
+    WINDOW.with(|w| {
+        let guard = w.borrow();
+        let win = guard.as_ref()?;
+        let (row, _) = win.get_cursor().into_result().ok()?;
+        BUFFER.with(|b| {
+            let guard = b.borrow();
+            let buf = guard.as_ref()?;
+            let line_idx = row.saturating_sub(1);
+            let text = buf
+                .get_lines(line_idx..line_idx + 1, false)
+                .ok()?
+                .next()?
+                .to_string_lossy()
+                .to_string();
+            parse_revision_line(&text)
+        })
+    })
+}
+
+fn parse_revision_line(text: &str) -> Option<u32> {
+    let rest = text.strip_prefix(REVISION_PREFIX)?;
+    let rest = rest.strip_prefix("revision ")?;
+    let num_end = rest.find(|c: char| !c.is_ascii_digit())?;
+    rest[..num_end].parse().ok()
 }

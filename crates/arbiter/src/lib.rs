@@ -17,6 +17,7 @@ mod poll;
 mod prompts;
 mod response_panel;
 mod review;
+mod revision;
 pub mod state;
 pub mod threads;
 pub mod types;

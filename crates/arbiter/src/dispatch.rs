@@ -21,7 +21,7 @@ static HANDLE: Mutex<Option<AsyncHandle>> = Mutex::new(None);
 
 /// Initializes the dispatcher. Must be called once from the main thread
 /// during plugin setup, before any background threads call `schedule()`.
-pub fn init() -> nvim_oxi::Result<()> {
+pub(crate) fn init() -> nvim_oxi::Result<()> {
     let handle = AsyncHandle::new(drain)?;
     // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
     *HANDLE.lock().expect("dispatch handle lock") = Some(handle);
@@ -68,7 +68,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// Safe to call from any thread. The closure runs on the next libuv
 /// event loop iteration via `AsyncHandle::send()`. If the closure
 /// panics, the review workbench is closed and an error is displayed.
-pub fn schedule<F>(f: F)
+pub(crate) fn schedule<F>(f: F)
 where
     F: FnOnce() + Send + 'static,
 {
@@ -78,7 +78,7 @@ where
         .expect("dispatch queue lock")
         .push_back(Box::new(f));
     // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
-    if let Some(ref handle) = *HANDLE.lock().expect("dispatch handle lock") {
+    if let Some(handle) = HANDLE.lock().expect("dispatch handle lock").as_ref() {
         let _ = handle.send();
     }
 }

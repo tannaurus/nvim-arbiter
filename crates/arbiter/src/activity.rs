@@ -20,7 +20,7 @@ fn now_millis() -> i64 {
 ///
 /// When `busy` is true, records the current time for elapsed display.
 /// When false, clears the state.
-pub fn set_busy(busy: bool) {
+pub(crate) fn set_busy(busy: bool) {
     if busy {
         START_TIME.store(now_millis(), Ordering::SeqCst);
         BUSY.store(true, Ordering::SeqCst);
@@ -34,7 +34,7 @@ pub fn set_busy(busy: bool) {
 ///
 /// Empty when idle. Shows elapsed seconds when the backend is busy,
 /// e.g. `[agent thinking... 12s]` or `[agent thinking... 12s | 2 queued]`.
-pub fn statusline_component() -> String {
+pub(crate) fn statusline_component() -> String {
     if !BUSY.load(Ordering::SeqCst) {
         return String::new();
     }

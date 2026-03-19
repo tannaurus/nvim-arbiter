@@ -8,9 +8,10 @@ pub(crate) mod window;
 
 pub use input::{close as input_close, open, open_for_line, OnCancel, OnSubmit};
 pub use window::{
-    append_learned_rules, append_message, append_status, append_streaming, close as window_close,
-    current_thread_id as window_thread_id, is_open as window_is_open, open as window_open,
-    replace_last_agent_message, OnClose, OnReplyRequested,
+    append_interrupted, append_learned_rules, append_message, append_revision_summary,
+    append_status, append_streaming, close as window_close, current_thread_id as window_thread_id,
+    is_open as window_is_open, open as window_open, replace_last_agent_message, revision_at_cursor,
+    OnClose, OnReplyRequested, OnRevisionSelected,
 };
 
 use crate::types::{Role, ThreadOrigin, ThreadStatus};
@@ -29,6 +30,54 @@ pub struct Message {
     pub text: String,
     /// Unix timestamp when the message was created.
     pub ts: i64,
+    /// Present when this message was authored while viewing a revision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_context: Option<RevisionRef>,
+}
+
+/// Reference to a specific location within a revision.
+///
+/// Attached to messages that were authored while viewing a revision diff,
+/// linking the comment back to the exact file and line within that revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionRef {
+    /// Which revision (by index) the comment refers to.
+    pub revision_index: u32,
+    /// File within the revision.
+    pub file: String,
+    /// Line number in the revision's diff.
+    pub line: u32,
+}
+
+/// A single file's before/after content within a revision.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionFile {
+    /// Relative file path.
+    pub path: String,
+    /// File content before the agent response. None if the file was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// File content after the agent response. None if the file was deleted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+/// A snapshot of changes produced by a single agent response.
+///
+/// Each non-trivial agent response (one that modifies files) creates a
+/// revision on its parent thread. Revisions can be viewed in isolation
+/// to understand exactly what one response changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Revision {
+    /// Sequential index within the thread (1, 2, 3...).
+    pub index: u32,
+    /// Unix timestamp when captured.
+    pub ts: i64,
+    /// Index into the thread's `messages` vec for the agent message
+    /// that produced this revision.
+    pub message_index: usize,
+    /// Per-file before/after snapshots (only files that changed).
+    pub files: Vec<RevisionFile>,
 }
 
 /// Options for thread creation.
@@ -77,6 +126,9 @@ pub struct Thread {
     pub messages: Vec<Message>,
     /// If true, comment is pending (not yet sent).
     pub pending: bool,
+    /// Revisions captured per agent response that modifies files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<Revision>,
 }
 
 /// Options for filtering threads.
@@ -98,6 +150,7 @@ pub fn create(file: &str, line: u32, text: &str, opts: CreateOpts) -> Thread {
         role: Role::User,
         text: text.to_string(),
         ts,
+        revision_context: None,
     };
     Thread {
         id: Uuid::new_v4().to_string(),
@@ -113,6 +166,7 @@ pub fn create(file: &str, line: u32, text: &str, opts: CreateOpts) -> Thread {
         session_id: None,
         messages: vec![msg],
         pending: opts.pending,
+        revisions: Vec::new(),
     }
 }
 
@@ -126,6 +180,7 @@ pub fn add_message(thread: &mut Thread, role: Role, text: &str) {
         role,
         text: text.to_string(),
         ts,
+        revision_context: None,
     });
 }
 

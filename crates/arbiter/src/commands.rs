@@ -47,7 +47,7 @@ fn with_review_cmd(f: impl FnOnce(&mut review::Review)) {
 }
 
 /// Registers all user commands. Called from setup().
-pub fn register_commands() -> nvim_oxi::Result<()> {
+pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
     api::create_user_command(
         "Arbiter",
         |_args: CommandArgs| {
@@ -452,8 +452,8 @@ pub fn register_commands() -> nvim_oxi::Result<()> {
                 let state_dir = r.config.state_dir();
                 let ws_hash = crate::state::workspace_hash(std::path::Path::new(&r.cwd));
                 crate::state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
-                if let Some(ref p) = r.current_file.clone() {
-                    review::select_file_impl(r, p);
+                if let Some(p) = r.current_file.clone() {
+                    review::select_file_impl(r, &p);
                 }
                 review::rerender_file_panel(r);
                 let _ = api::notify(

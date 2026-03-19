@@ -3,6 +3,7 @@
 //! Builds buffer content from diff text and thread summaries,
 //! applies highlights, and provides side-by-side diff mode.
 
+use crate::config::{self, DiffStyle};
 use crate::types::{ThreadOrigin, ThreadStatus};
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::{self, Buffer, Window};
@@ -37,7 +38,7 @@ fn set_buffer_lines(buf: &mut Buffer, lines: &[String]) -> nvim_oxi::Result<()> 
 ///
 /// If `new_hunk_buf_starts` is provided, ArbiterHunkNew highlight is applied
 /// to those hunk header lines.
-pub fn render(
+pub(crate) fn render(
     buf: &mut Buffer,
     diff_text: &str,
     summaries: &[ThreadSummary],
@@ -141,9 +142,12 @@ pub fn render(
 
 /// Applies syntax highlighting to the diff buffer.
 ///
+/// When `diff_style` is `Full`, applies full-line background colors (the default).
+/// When `Signs`, places colored gutter signs while preserving syntax highlighting.
+///
 /// If `new_hunk_buf_starts` contains a hunk's buf_start, also adds ArbiterHunkNew.
 /// Accepted hunks (buf_start in `accepted_buf_starts`) get ArbiterHunkAccepted on all lines.
-pub fn apply_highlights(
+pub(crate) fn apply_highlights(
     buf: &mut Buffer,
     hunks: &[Hunk],
     summaries: &[&ThreadSummary],
@@ -153,6 +157,8 @@ pub fn apply_highlights(
 ) -> nvim_oxi::Result<()> {
     let ns = api::create_namespace("arbiter-diff");
     let _ = buf.clear_namespace(ns, 0..usize::MAX);
+
+    let style = config::get().review.diff_style;
 
     let mut line_idx = 0;
     buf.add_highlight(ns, "ArbiterDiffFile", line_idx, 0..)?;
@@ -172,6 +178,37 @@ pub fn apply_highlights(
     }
 
     let offset = line_idx;
+    match style {
+        DiffStyle::Full => apply_full_highlights(
+            buf,
+            ns,
+            hunks,
+            lines,
+            offset,
+            new_hunk_buf_starts,
+            accepted_buf_starts,
+        ),
+        DiffStyle::Signs => apply_sign_highlights(
+            buf,
+            ns,
+            hunks,
+            lines,
+            offset,
+            new_hunk_buf_starts,
+            accepted_buf_starts,
+        ),
+    }
+}
+
+fn apply_full_highlights(
+    buf: &mut Buffer,
+    ns: u32,
+    hunks: &[Hunk],
+    lines: &[String],
+    offset: usize,
+    new_hunk_buf_starts: Option<&HashSet<usize>>,
+    accepted_buf_starts: &HashSet<usize>,
+) -> nvim_oxi::Result<()> {
     for h in hunks {
         let is_accepted = accepted_buf_starts.contains(&h.buf_start);
         if is_accepted {
@@ -186,7 +223,7 @@ pub fn apply_highlights(
         if is_new {
             buf.add_highlight(ns, "ArbiterHunkNew", h.buf_start, 0..)?;
         }
-        buf.add_highlight(ns, "ArbiterDiffChange", h.buf_start, 0..)?;
+        buf.add_highlight(ns, "ArbiterDiffHunkHeader", h.buf_start, 0..)?;
         for i in (h.buf_start + 1)..=h.buf_end {
             if i >= offset && i < lines.len() {
                 let s = &lines[i];
@@ -195,12 +232,75 @@ pub fn apply_highlights(
                 } else if s.starts_with('-') && !s.starts_with("---") {
                     buf.add_highlight(ns, "ArbiterDiffDelete", i, 0..)?;
                 } else if s.starts_with("@@ ") {
-                    buf.add_highlight(ns, "ArbiterDiffChange", i, 0..)?;
+                    buf.add_highlight(ns, "ArbiterDiffHunkHeader", i, 0..)?;
+                } else if s.starts_with(' ') {
+                    buf.add_highlight(ns, "ArbiterDiffContext", i, 0..)?;
                 }
             }
         }
     }
+    Ok(())
+}
 
+fn apply_sign_highlights(
+    buf: &mut Buffer,
+    ns: u32,
+    hunks: &[Hunk],
+    lines: &[String],
+    offset: usize,
+    new_hunk_buf_starts: Option<&HashSet<usize>>,
+    accepted_buf_starts: &HashSet<usize>,
+) -> nvim_oxi::Result<()> {
+    let ext_builder = nvim_oxi::api::opts::SetExtmarkOpts::builder();
+
+    for h in hunks {
+        let is_accepted = accepted_buf_starts.contains(&h.buf_start);
+        if is_accepted {
+            for i in h.buf_start..=h.buf_end {
+                buf.add_highlight(ns, "ArbiterHunkAccepted", i, 0..)?;
+            }
+            continue;
+        }
+        let is_new = new_hunk_buf_starts
+            .map(|s| s.contains(&h.buf_start))
+            .unwrap_or(false);
+        if is_new {
+            buf.add_highlight(ns, "ArbiterHunkNew", h.buf_start, 0..)?;
+        }
+
+        let header_opts = ext_builder
+            .clone()
+            .sign_text("┃")
+            .sign_hl_group("ArbiterGutterHunkHeader")
+            .number_hl_group("ArbiterGutterHunkHeader")
+            .build();
+        let _ = buf.set_extmark(ns, h.buf_start, 0, &header_opts);
+        buf.add_highlight(ns, "ArbiterDiffHunkHeader", h.buf_start, 0..)?;
+
+        for i in (h.buf_start + 1)..=h.buf_end {
+            if i >= offset && i < lines.len() {
+                let s = &lines[i];
+                let (sign_hl, sign_char) = if s.starts_with('+') && !s.starts_with("+++") {
+                    ("ArbiterGutterAdd", "▌")
+                } else if s.starts_with('-') && !s.starts_with("---") {
+                    ("ArbiterGutterDelete", "▌")
+                } else if s.starts_with("@@ ") {
+                    ("ArbiterGutterHunkHeader", "┃")
+                } else if s.starts_with(' ') {
+                    ("ArbiterGutterContext", "│")
+                } else {
+                    continue;
+                };
+                let opts = ext_builder
+                    .clone()
+                    .sign_text(sign_char)
+                    .sign_hl_group(sign_hl)
+                    .number_hl_group(sign_hl)
+                    .build();
+                let _ = buf.set_extmark(ns, i, 0, &opts);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -211,7 +311,7 @@ pub fn apply_highlights(
 /// filetype for syntax highlighting, and buffer names indicate which
 /// side is which. Closing both windows closes the tabpage and returns
 /// to the review workbench.
-pub fn open_side_by_side(
+pub(crate) fn open_side_by_side(
     ref_content: &str,
     working_content: &str,
     file_path: &str,
@@ -306,7 +406,7 @@ pub fn open_side_by_side(
 /// Disables diff mode in both windows, then closes them. Since the
 /// side-by-side opens in its own tabpage, closing both windows
 /// automatically returns to the review workbench tab.
-pub fn close_side_by_side(
+pub(crate) fn close_side_by_side(
     _left_buf: &Buffer,
     left_win: &Window,
     _right_buf: &Buffer,
@@ -327,7 +427,7 @@ pub fn close_side_by_side(
 /// is true, all hunks start folded. Accepted hunks (buf_start in
 /// `accepted_buf_starts`) are always folded and get "[accepted]" in their fold
 /// text via an inline foldtext expression.
-pub fn set_hunk_folds(
+pub(crate) fn set_hunk_folds(
     buf: &mut Buffer,
     win: &Window,
     hunks: &[Hunk],
@@ -383,7 +483,7 @@ pub fn set_hunk_folds(
     Ok(())
 }
 
-pub fn win_exec(wid: i32, cmd: &str) {
+pub(crate) fn win_exec(wid: i32, cmd: &str) {
     let escaped = cmd.replace('\'', "''");
     let _ = api::command(&format!("call win_execute({wid}, '{escaped}')"));
 }

@@ -9,14 +9,14 @@ mod cursor;
 mod queue;
 
 use crate::types::{BackendOp, BackendOpts, OnComplete, OnStream};
-pub use adapter::Adapter;
+pub(crate) use adapter::Adapter;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Minimal config for backend setup. Workspace defaults to cwd at setup time.
 #[derive(Debug, Clone)]
-pub struct BackendConfig {
+pub(crate) struct BackendConfig {
     /// `"cursor"` or `"claude"`.
     pub backend: String,
     /// Optional model override.
@@ -40,11 +40,18 @@ impl Default for BackendConfig {
     }
 }
 
+/// Registers a callback invoked when a tagged queue item starts processing.
+/// Used by the review module to update the thread panel status from
+/// "queued" to "thinking" when the queue advances.
+pub(crate) fn set_on_item_started(cb: Box<dyn Fn(&str) + Send + Sync>) {
+    queue::set_on_item_started(cb);
+}
+
 /// Initializes the backend. Stores config and selects adapter.
 ///
 /// For E3-1, uses a no-op adapter until E3-2 provides real implementations.
 /// Call `setup_with_adapter` from tests to inject a mock.
-pub fn setup(config: BackendConfig) {
+pub(crate) fn setup(config: BackendConfig) {
     let adapter: Arc<dyn Adapter + Send + Sync> = match config.backend.as_str() {
         "cursor" => Arc::new(cursor::CursorAdapter::new(config)),
         "claude" => Arc::new(claude::ClaudeAdapter::new(config)),
@@ -60,12 +67,12 @@ fn setup_with_adapter(adapter: Arc<dyn Adapter + Send + Sync>) {
 }
 
 /// Enqueues a CLI call. Callback runs on main thread via `dispatch::schedule`.
-pub fn send(opts: BackendOpts, on_stream: Option<OnStream>, callback: OnComplete) {
+pub(crate) fn send(opts: BackendOpts, on_stream: Option<OnStream>, callback: OnComplete) {
     send_tagged(opts, on_stream, callback, None);
 }
 
 /// Enqueues a CLI call at the front of the queue so it runs next.
-pub fn send_priority(opts: BackendOpts, callback: OnComplete) {
+pub(crate) fn send_priority(opts: BackendOpts, callback: OnComplete) {
     queue::push_front(queue::QueueItem {
         opts,
         on_stream: None,
@@ -75,7 +82,7 @@ pub fn send_priority(opts: BackendOpts, callback: OnComplete) {
 }
 
 /// Enqueues a CLI call with an optional tag for scoped cancellation.
-pub fn send_tagged(
+pub(crate) fn send_tagged(
     opts: BackendOpts,
     on_stream: Option<OnStream>,
     callback: OnComplete,
@@ -96,7 +103,7 @@ fn is_busy() -> bool {
 }
 
 /// Cancels all pending items and causes in-flight callbacks to no-op.
-pub fn cancel_all() {
+pub(crate) fn cancel_all() {
     queue::cancel_all()
 }
 
@@ -106,7 +113,7 @@ pub fn cancel_all() {
 /// when replying in a thread to avoid interrupting unrelated sessions.
 /// If the in-flight request matches, its child process is killed so the
 /// adapter thread unblocks and the queue advances immediately.
-pub fn cancel_tagged(tag: &str) {
+pub(crate) fn cancel_tagged(tag: &str) {
     let was_inflight = queue::inflight_tag().as_deref() == Some(tag);
     queue::cancel_tagged(tag);
     if was_inflight {
@@ -115,7 +122,7 @@ pub fn cancel_tagged(tag: &str) {
 }
 
 /// Returns the tag (thread ID) of the currently in-flight request, if any.
-pub fn inflight_tag() -> Option<String> {
+pub(crate) fn inflight_tag() -> Option<String> {
     queue::inflight_tag()
 }
 
@@ -123,23 +130,23 @@ pub fn inflight_tag() -> Option<String> {
 ///
 /// Called from `on_stream` callbacks so that `open_active_thread` can
 /// display text that arrived before the thread window was opened.
-pub fn append_inflight_stream(chunk: &str) {
+pub(crate) fn append_inflight_stream(chunk: &str) {
     queue::append_inflight_stream(chunk);
 }
 
 /// Returns the accumulated streaming text for the in-flight request.
-pub fn inflight_stream() -> String {
+pub(crate) fn inflight_stream() -> String {
     queue::inflight_stream()
 }
 
 /// Returns the number of requests waiting in the queue (excludes in-flight).
-pub fn pending_count() -> usize {
+pub(crate) fn pending_count() -> usize {
     queue::pending_count()
 }
 
 /// Returns the 0-based queue position of the request tagged with `tag`,
 /// or `None` if it is not waiting (already in-flight or absent).
-pub fn queue_position(tag: &str) -> Option<usize> {
+pub(crate) fn queue_position(tag: &str) -> Option<usize> {
     queue::queue_position(tag)
 }
 
@@ -197,7 +204,7 @@ pub(crate) fn untrack_child(handle: &SharedChild) {
 /// Called from `VimLeavePre` to ensure no orphaned CLI processes survive
 /// after Neovim exits. Killing the child closes its stdout pipe, which
 /// unblocks any `BufReader::lines()` loop in the adapter thread.
-pub fn shutdown() {
+pub(crate) fn shutdown() {
     SHUTDOWN.store(true, Ordering::SeqCst);
     cancel_all();
     let handles: Vec<SharedChild> = CHILDREN.lock().expect("children lock").drain(..).collect();
@@ -214,7 +221,7 @@ static MISSING_BINARY_NOTIFIED: AtomicBool = AtomicBool::new(false);
 ///
 /// Call from BackendResult callbacks when `res.error` is present.
 /// Prevents repeated ERROR notifications.
-pub fn notify_if_missing_binary(error: &str) {
+pub(crate) fn notify_if_missing_binary(error: &str) {
     let is_missing = error.contains("not found")
         || error.contains("No such file")
         || error.contains("binary not found")
@@ -231,7 +238,7 @@ pub fn notify_if_missing_binary(error: &str) {
 /// Send a comment (new session). Optionally streams when `on_stream` is provided.
 ///
 /// `tag` associates this request with a thread for scoped cancellation.
-pub fn send_comment(
+pub(crate) fn send_comment(
     prompt: &str,
     on_stream: Option<OnStream>,
     callback: OnComplete,
@@ -254,7 +261,7 @@ pub fn send_comment(
 /// Reply to a thread (resume session). Optionally streams.
 ///
 /// `tag` associates this request with a thread for scoped cancellation.
-pub fn thread_reply(
+pub(crate) fn thread_reply(
     session_id: Option<&str>,
     prompt: &str,
     on_stream: Option<OnStream>,
@@ -279,7 +286,7 @@ pub fn thread_reply(
 }
 
 /// Catch up (continue review session with summarization prompt).
-pub fn catch_up(session_id: Option<&str>, prompt: &str, callback: OnComplete) {
+pub(crate) fn catch_up(session_id: Option<&str>, prompt: &str, callback: OnComplete) {
     let op = session_id
         .map(|s| BackendOp::Resume(s.to_string()))
         .unwrap_or(BackendOp::ContinueLatest);
@@ -297,7 +304,7 @@ pub fn catch_up(session_id: Option<&str>, prompt: &str, callback: OnComplete) {
 }
 
 /// Self-review (new session, no stream, optional json_schema for Claude).
-pub fn self_review(prompt: &str, json_schema: Option<String>, callback: OnComplete) {
+pub(crate) fn self_review(prompt: &str, json_schema: Option<String>, callback: OnComplete) {
     send(
         BackendOpts {
             op: BackendOp::NewSession,
@@ -312,7 +319,7 @@ pub fn self_review(prompt: &str, json_schema: Option<String>, callback: OnComple
 }
 
 /// Re-anchor (resume session in ask mode).
-pub fn re_anchor(session_id: &str, prompt: &str, callback: OnComplete) {
+pub(crate) fn re_anchor(session_id: &str, prompt: &str, callback: OnComplete) {
     send(
         BackendOpts {
             op: BackendOp::Resume(session_id.to_string()),
@@ -327,7 +334,7 @@ pub fn re_anchor(session_id: &str, prompt: &str, callback: OnComplete) {
 }
 
 /// Send a free-form prompt (new session). Optionally streams.
-pub fn send_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnComplete) {
+pub(crate) fn send_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnComplete) {
     send(
         BackendOpts {
             op: BackendOp::NewSession,
@@ -342,7 +349,7 @@ pub fn send_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnComple
 }
 
 /// Continue the latest session. Optionally streams.
-pub fn continue_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnComplete) {
+pub(crate) fn continue_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnComplete) {
     send(
         BackendOpts {
             op: BackendOp::ContinueLatest,
@@ -358,7 +365,7 @@ pub fn continue_prompt(prompt: &str, on_stream: Option<OnStream>, callback: OnCo
 
 /// Parsed thread from Cursor self-review text response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedThread {
+pub(crate) struct ParsedThread {
     pub file: String,
     pub line: u32,
     pub message: String,
@@ -369,7 +376,7 @@ pub struct ParsedThread {
 /// Lenient: strips markdown code fences, bullet prefixes (`- `, `* `),
 /// backticks; accepts `THREAD:`, `THREAD ` or `THREAD|` prefix.
 /// Invalid lines are silently discarded.
-pub fn parse_self_review_text(text: &str) -> Vec<ParsedThread> {
+pub(crate) fn parse_self_review_text(text: &str) -> Vec<ParsedThread> {
     text.lines()
         .filter_map(|line| {
             let trimmed = line.trim();

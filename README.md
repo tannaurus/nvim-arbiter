@@ -29,18 +29,18 @@ These are decisions made during or around the review. They'd rot in a skill file
 - **PR-style diffs** -- Dedicated tabpage with file panel and diff viewer. Diff against a branch via `git merge-base`, or diff unstaged working tree changes.
 - **Line-anchored threads** -- Comment on a diff line, get a streaming response. Threads persist across sessions.
 - **Review memory** -- Conventions you enforce get extracted and fed into future prompts automatically.
-- **Progress tracking** -- Approve files, accept hunks, filter threads by status. State saved to disk.
+- **Progress tracking** -- Approve files, accept hunks, filter threads by status. In working tree mode, accepting hunks stages them in git. State saved to disk.
 - **Self-review** -- The agent reviews its own diff and flags concerns before you start.
 - **Live diffs** -- Filesystem polling picks up the agent's changes without manual refresh.
 - **Auto-resolve** -- Simple feedback ("rename this") resolves itself once the agent applies the fix.
-- **Session persistence** -- Review state, threads, and conversations restored when you reopen.
+- **Session persistence** -- Review state, threads, and conversations restored when you reopen. Stale caches from older plugin versions are automatically discarded.
 
 ## Workflow
 
 Arbiter works in two modes depending on how you open it:
 
-- **Working tree review** (`:Arbiter`) - Diffs unstaged changes against HEAD. Use this when you're iterating with an agent in real time and haven't committed yet. You see exactly what the agent has changed since your last commit.
-- **Branch review** (`:ArbiterCompare main`) - Diffs your current branch against a base ref using `git merge-base`, so you only see changes introduced by your branch. This matches what a GitHub/GitLab PR would show. Use this when you're reviewing a full feature branch before merging. If you set `review.default_ref` in your config, `:ArbiterCompare` with no argument uses that ref.
+- **Working tree review** (`:Arbiter`) - Diffs unstaged changes against HEAD. Use this when you're iterating with an agent in real time and haven't committed yet. You see exactly what the agent has changed since your last commit. Accepting hunks (`<Leader>as`) and approving files (`<Leader>aa`) stage changes in git, so you can build up a commit as you review. Unstaging only reverses what Arbiter staged; pre-existing staged content is preserved.
+- **Branch review** (`:ArbiterCompare main`) - Diffs your current branch against a base ref using `git merge-base`, so you only see changes introduced by your branch. This matches what a GitHub/GitLab PR would show. Use this when you're reviewing a full feature branch before merging. Accepting hunks and approving files in this mode is visual-only (no git staging). If you set `review.default_ref` in your config, `:ArbiterCompare` with no argument uses that ref.
 
 Both modes use the same workbench, threads, and feedback loop. The only difference is what the diff is computed against.
 
@@ -56,7 +56,7 @@ Both modes use the same workbench, threads, and feedback loop. The only differen
 
 5. **The agent revises.** The agent reads your feedback and makes changes. Arbiter polls the filesystem and updates the diff automatically - you see changes appear without refreshing.
 
-6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Accept individual hunks with `<Leader>as` to track your progress within a file - when all hunks are accepted, the file is auto-approved. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Run `:ArbiterSummary` for a summary of where you stand.
+6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Accept individual hunks with `<Leader>as` to track your progress within a file - when all hunks are accepted, the file is auto-approved. In working tree mode, accepting a hunk stages it in git (`git apply --cached`); toggling it back unstages only that hunk, leaving any pre-existing staged content untouched. In branch review mode, acceptance is visual-only. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Run `:ArbiterSummary` for a summary of where you stand.
 
 7. **Repeat.** Continue reviewing, commenting, and approving until the changeset looks right. Close the workbench with `q` when you're done. Your review state (approvals, threads, conversations) is persisted to disk and restored if you reopen.
 
@@ -93,10 +93,11 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 | Rust toolchain | stable | `cargo` and `rustc` must be on `$PATH` to compile the native library |
 | Git | any recent | The plugin shells out to `git` for diffs, merge-base, file lists, etc. |
 | Cursor CLI **or** Claude Code CLI | | At least one: `cursor` (via Cursor editor) or `claude` (via `npm install -g @anthropic-ai/claude-code`) |
+| nvim-tree | recommended | Recommended for the file panel. A basic builtin tree ships by default, but nvim-tree provides file icons, review status signs, and familiar keybindings. See [Using nvim-tree](#using-nvim-tree). |
 
 **Platform support:** macOS and Linux. No Windows support.
 
-**State directory:** Review state, threads, and sessions are persisted to `~/.local/share/nvim/arbiter/` by default. Override with `review.state_dir` in config.
+**State directory:** Review state, threads, and sessions are persisted to `~/.local/share/nvim/arbiter/` by default. Override with `review.state_dir` in config. Persisted state is version-stamped; upgrading the plugin automatically discards stale caches.
 
 ## Installation
 
@@ -200,6 +201,22 @@ require("arbiter").setup({
   -- at lines that have an active thread. Clicking a marker opens the thread.
   inline_indicators = false,
 
+  -- File panel implementation: "builtin" or "nvim-tree".
+  -- "builtin" renders a simple tree into a scratch buffer (default).
+  -- "nvim-tree" is recommended for a richer experience: file icons,
+  -- review status signs, and familiar navigation. See "Using nvim-tree".
+  file_panel = "builtin",
+
+  -- Review status icons shown in the nvim-tree file panel sign column.
+  -- Any string works (Unicode, Nerd Font glyphs, emoji).
+  -- Unset fields auto-detect: Nerd Font if nvim-web-devicons is installed,
+  -- Unicode otherwise.
+  icons = {
+    approved = nil,      -- default: "" (nerd) or "✔" (unicode)
+    needs_changes = nil,  -- default: "" (nerd) or "✘" (unicode)
+    unreviewed = nil,    -- default: "" (nerd) or "○" (unicode)
+  },
+
   -- When true, every agent response triggers an extraction call to distill
   -- generalizable coding conventions from the conversation. Extracted rules
   -- are injected into future thread prompts so the agent learns from your
@@ -287,7 +304,7 @@ require("arbiter").setup({
     next_thread = "]t",           -- Next open thread (crosses files)
     prev_thread = "[t",           -- Previous open thread (crosses files)
     toggle_side_by_side = "<Leader>s",  -- Toggle unified / side-by-side view
-    approve = "<Leader>aa",       -- Approve file (or resolve thread at cursor)
+    approve = "<Leader>aa",       -- Approve file (stages all hunks in working tree mode; resolve thread at cursor)
     needs_changes = "<Leader>ax", -- Mark file as needs-changes
     reset_status = "<Leader>ar",  -- Reset file to unreviewed
     comment = "<Leader>ac",       -- Comment on the line and send to the agent
@@ -305,7 +322,7 @@ require("arbiter").setup({
     cancel_request = "<Leader>aK", -- Cancel all pending backend requests
     next_unreviewed = "<Leader>an", -- Jump to next unreviewed file
     prev_unreviewed = "<Leader>ap", -- Jump to previous unreviewed file
-    accept_hunk = "<Leader>as",   -- Accept/unaccept hunk under cursor
+    accept_hunk = "<Leader>as",   -- Accept/unaccept hunk under cursor (stages/unstages in working tree mode)
     file_back = "<C-o>",          -- Navigate back through file history
   },
 })
@@ -344,6 +361,25 @@ workspaces = {
 If none of these resolve, `:ArbiterCompare` shows an error. Use `:Arbiter` for unstaged changes instead.
 
 You can also change the ref on the fly during an active review with `:ArbiterRef`.
+
+### Using nvim-tree
+
+Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, needs changes, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
+
+To enable it, set `file_panel = "nvim-tree"` in your arbiter config and wire arbiter's filter into your nvim-tree setup:
+
+```lua
+require("nvim-tree").setup({
+  -- your existing config ...
+  filters = {
+    custom = require("arbiter.nvim_tree_adapter").filter,
+  },
+})
+```
+
+The filter is context-aware: when no review is active, it returns `false` for everything and nvim-tree behaves normally. When a review is open, it hides files that aren't part of the changeset. The filter is cleared automatically when the review closes.
+
+If you skip the `filters.custom` step, the nvim-tree panel will still work but will show all files in the project, not just changed ones.
 
 ### Backend permissions
 
@@ -408,10 +444,10 @@ All keybindings are active in the review workbench tabpage and are fully configu
 
 | Default | Action |
 |---------|--------|
-| `<Leader>aa` | Toggle approval on current file (or resolve thread if cursor is on a thread summary) |
+| `<Leader>aa` | Toggle approval on current file. In working tree mode, stages all hunks on approve and unstages on unapprove. Resolves thread if cursor is on a thread summary. |
 | `<Leader>ax` | Mark as needs-changes |
 | `<Leader>ar` | Reset to unreviewed |
-| `<Leader>as` | Accept/unaccept the hunk under the cursor (auto-approves file when all hunks accepted) |
+| `<Leader>as` | Accept/unaccept the hunk under the cursor. In working tree mode, stages/unstages the hunk in git. Auto-approves file when all hunks accepted. |
 | `<Leader>an` | Jump to next unreviewed file |
 | `<Leader>ap` | Jump to previous unreviewed file |
 
@@ -519,10 +555,10 @@ The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C 
 - `threads/` - Thread CRUD, anchoring, re-anchoring, filtering, and thread panel
 - `review.rs` - Core review workbench state and UI orchestration
 - `dispatch.rs` - Safe cross-thread callback dispatch via `libuv::AsyncHandle`
-- `git.rs` - Async git operations (merge-base, diff, show, stash)
+- `git.rs` - Async git operations (merge-base, diff, show, stash) and synchronous staging/unstaging
 - `state.rs` - JSON persistence of review state, threads, and sessions
 - `config.rs` - Configuration deserialization with per-workspace overrides
-- `file_panel.rs` - Tree rendering with directory folding
+- `file_panel/` - File panel trait and implementations (builtin tree, nvim-tree adapter)
 - `poll.rs` - Periodic file and file-list refresh via libuv timers
 - `activity.rs` - Backend busy/idle tracking for statusline display
 - `highlight.rs` - Custom highlight groups and sign definitions

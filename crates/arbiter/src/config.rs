@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 /// Missing fields use defaults via `#[serde(default)]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct Config {
+pub(crate) struct Config {
     /// Backend: "cursor" or "claude".
     pub backend: BackendKind,
     /// Optional model override.
@@ -20,6 +20,8 @@ pub struct Config {
     pub workspace: Option<String>,
     /// Show thread signs in normal buffers.
     pub inline_indicators: bool,
+    /// Which file panel implementation to use.
+    pub file_panel: FilePanelKind,
     /// Review-specific options.
     pub review: ReviewConfig,
     /// Prompt templates.
@@ -43,6 +45,10 @@ pub struct Config {
     /// Per-workspace overrides, keyed by absolute directory path.
     /// Only `default_ref` is supported currently.
     pub workspaces: HashMap<String, WorkspaceOverride>,
+    /// Custom icons for review status signs in the nvim-tree file panel.
+    /// Any field left unset auto-detects: Nerd Font glyphs if
+    /// nvim-web-devicons is installed, Unicode otherwise.
+    pub icons: IconConfig,
 }
 
 impl Default for Config {
@@ -54,6 +60,7 @@ impl Default for Config {
                 .ok()
                 .and_then(|p| p.to_str().map(String::from)),
             inline_indicators: false,
+            file_panel: FilePanelKind::Builtin,
             learn_rules: true,
             review: ReviewConfig::default(),
             prompts: PromptConfig::default(),
@@ -61,22 +68,22 @@ impl Default for Config {
             keymaps: KeymapConfig::default(),
             extra_args: Vec::new(),
             workspaces: HashMap::new(),
+            icons: IconConfig::default(),
         }
     }
 }
 
 /// Per-workspace configuration overrides.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
-pub struct WorkspaceOverride {
+pub(crate) struct WorkspaceOverride {
     /// Default ref branch for this workspace (e.g. "develop", "trunk").
     pub default_ref: Option<String>,
 }
 
 /// Backend selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BackendKind {
+pub(crate) enum BackendKind {
     #[default]
     Cursor,
     Claude,
@@ -98,16 +105,85 @@ impl<'de> Deserialize<'de> for BackendKind {
     }
 }
 
+/// File panel implementation selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum FilePanelKind {
+    /// Built-in tree rendered into a scratch buffer.
+    #[default]
+    Builtin,
+    /// Use nvim-tree as the file panel. Requires nvim-tree to be installed.
+    NvimTree,
+}
+
+impl<'de> Deserialize<'de> for FilePanelKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().replace('-', "_").as_str() {
+            "builtin" => Ok(FilePanelKind::Builtin),
+            "nvim_tree" | "nvimtree" => Ok(FilePanelKind::NvimTree),
+            _ => Err(serde::de::Error::custom(format!(
+                "invalid file_panel: {s}. Use 'builtin' or 'nvim-tree'"
+            ))),
+        }
+    }
+}
+
+/// Custom icons for review status signs.
+///
+/// All fields are optional. When unset, auto-detects Nerd Font glyphs
+/// (if nvim-web-devicons is available) and falls back to Unicode.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct IconConfig {
+    /// Icon shown for approved files. Examples: "✔", "", "👍"
+    pub approved: Option<String>,
+    /// Icon shown for files needing changes. Examples: "✘", "", "❌"
+    pub needs_changes: Option<String>,
+    /// Icon shown for unreviewed files. Examples: "○", "", "⏳"
+    pub unreviewed: Option<String>,
+}
+
+/// Diff highlighting style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DiffStyle {
+    /// Full-line background colors (GitHub-style). Replaces syntax highlighting.
+    #[default]
+    Full,
+    /// Colored gutter signs only. Preserves syntax highlighting on the line content.
+    Signs,
+}
+
+impl<'de> Deserialize<'de> for DiffStyle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "full" => Ok(DiffStyle::Full),
+            "signs" => Ok(DiffStyle::Signs),
+            _ => Err(serde::de::Error::custom(format!(
+                "invalid diff_style: {s}. Use 'full' or 'signs'"
+            ))),
+        }
+    }
+}
+
 /// Review-specific configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct ReviewConfig {
+pub(crate) struct ReviewConfig {
     /// Default ref for diff (e.g. "main"); nil = unstaged changes.
     pub default_ref: Option<String>,
     /// Start in side-by-side view.
     pub side_by_side: bool,
     /// Collapse approved hunks.
     pub fold_approved: bool,
+    /// Diff highlighting style: "full" (colored backgrounds) or "signs" (gutter markers).
+    pub diff_style: DiffStyle,
     /// Auto-resolve timeout in seconds.
     pub auto_resolve_timeout: u64,
     /// File poll interval in ms.
@@ -124,6 +200,7 @@ impl Default for ReviewConfig {
             default_ref: None,
             side_by_side: false,
             fold_approved: false,
+            diff_style: DiffStyle::Full,
             auto_resolve_timeout: 60,
             poll_interval: 2000,
             file_list_interval: 5000,
@@ -135,7 +212,7 @@ impl Default for ReviewConfig {
 /// Thread panel appearance configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct ThreadWindowConfig {
+pub(crate) struct ThreadWindowConfig {
     /// Panel split direction: "right", "left", "top", or "bottom".
     pub position: PanelPosition,
     /// Panel size in lines (top/bottom) or columns (left/right).
@@ -157,7 +234,7 @@ impl Default for ThreadWindowConfig {
 
 /// Split direction for the thread panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelPosition {
+pub(crate) enum PanelPosition {
     Top,
     Bottom,
     Left,
@@ -166,7 +243,7 @@ pub enum PanelPosition {
 
 impl PanelPosition {
     /// Returns the vim split command prefix and whether the split is vertical.
-    pub fn split_cmd(self, size: u32) -> String {
+    pub(crate) fn split_cmd(self, size: u32) -> String {
         let size = size.max(5);
         match self {
             PanelPosition::Top => format!("topleft {size}split"),
@@ -176,7 +253,7 @@ impl PanelPosition {
         }
     }
 
-    pub fn is_vertical(self) -> bool {
+    pub(crate) fn is_vertical(self) -> bool {
         matches!(self, PanelPosition::Left | PanelPosition::Right)
     }
 }
@@ -203,7 +280,7 @@ impl<'de> Deserialize<'de> for PanelPosition {
 ///
 /// This is not user-configurable because the parser in
 /// `backend::parse_self_review_text` depends on this exact wire format.
-pub const SELF_REVIEW_FORMAT_SUFFIX: &str = concat!(
+pub(crate) const SELF_REVIEW_FORMAT_SUFFIX: &str = concat!(
     " For each concern, output a line in exactly this format:\n\n",
     "THREAD|file/path|line_number|your question or concern\n\n",
     "Example:\n",
@@ -214,7 +291,7 @@ pub const SELF_REVIEW_FORMAT_SUFFIX: &str = concat!(
 /// Prompt template configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct PromptConfig {
+pub(crate) struct PromptConfig {
     /// Catch-up summarization prompt.
     pub catch_up: String,
     /// Self-review guidance. Format instructions for the THREAD wire format
@@ -241,7 +318,7 @@ impl Default for PromptConfig {
 /// Set any field to override the default binding.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct KeymapConfig {
+pub(crate) struct KeymapConfig {
     /// Jump to next hunk in the diff panel.
     pub next_hunk: String,
     /// Jump to previous hunk in the diff panel.
@@ -344,7 +421,7 @@ impl Config {
     ///
     /// Literal matches always take priority over regex matches.
     /// Falls back to `review.default_ref` if nothing matches.
-    pub fn default_ref_for(&self, cwd: &str) -> Option<&str> {
+    pub(crate) fn default_ref_for(&self, cwd: &str) -> Option<&str> {
         let canonical = std::path::Path::new(cwd)
             .canonicalize()
             .ok()
@@ -391,7 +468,7 @@ impl Config {
     }
 
     /// Returns the state directory for persisting review/thread data.
-    pub fn state_dir(&self) -> std::path::PathBuf {
+    pub(crate) fn state_dir(&self) -> std::path::PathBuf {
         self.review
             .state_dir
             .as_deref()
@@ -412,14 +489,14 @@ static DEFAULT: OnceLock<Config> = OnceLock::new();
 /// Stores config in the global OnceLock.
 ///
 /// Called from setup() after deserializing. Succeeds only on first call.
-pub fn set_config(config: Config) {
+pub(crate) fn set_config(config: Config) {
     let _ = CONFIG.set(config);
 }
 
 /// Returns the global config.
 ///
 /// Returns default config if setup() has not been called or deserialization failed.
-pub fn get() -> &'static Config {
+pub(crate) fn get() -> &'static Config {
     CONFIG
         .get()
         .unwrap_or_else(|| DEFAULT.get_or_init(Config::default))

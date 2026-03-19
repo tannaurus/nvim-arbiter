@@ -99,8 +99,15 @@ fn update_indicators() {
             if let Ok(threads) = open_threads_cell.lock() {
                 if let Some(t) = threads.iter().find(|x| x.line == line) {
                     let on_reply: threads::OnReplyRequested = Box::new(|| {});
-                    let _ =
-                        threads::window_open(&t.id, &t.file, t.line, &t.messages, on_reply, None);
+                    let _ = threads::window_open(
+                        &t.id,
+                        &t.file,
+                        t.line,
+                        &t.messages,
+                        on_reply,
+                        None,
+                        None,
+                    );
                 }
             }
         })
@@ -113,7 +120,7 @@ fn update_indicators() {
 /// Registers BufEnter and BufLeave autocmds for inline indicators when config enables it.
 ///
 /// BufEnter updates indicators for the current buffer. BufLeave clears them.
-pub fn setup() -> nvim_oxi::Result<()> {
+pub(crate) fn setup() -> nvim_oxi::Result<()> {
     if !config::get().inline_indicators {
         return Ok(());
     }

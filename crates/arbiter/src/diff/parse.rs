@@ -10,8 +10,8 @@ use std::collections::HashSet;
 ///
 /// Buffer positions (`buf_start`, `buf_end`) are 0-based and inclusive.
 /// They are populated by the renderer after accounting for injected lines.
-#[derive(Debug, Clone)]
-pub struct Hunk {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Hunk {
     /// First buffer line of this hunk (0-based).
     pub buf_start: usize,
     /// Last buffer line of this hunk (0-based).
@@ -32,7 +32,7 @@ pub struct Hunk {
 
 /// Source file location for a buffer line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceLocation {
+pub(crate) struct SourceLocation {
     /// File path (from diff header or caller).
     pub file: String,
     /// 1-based line number in the source file.
@@ -42,7 +42,7 @@ pub struct SourceLocation {
 /// Computes a content hash for change detection.
 ///
 /// Uses SHA256 truncated to 12 hex chars. Deterministic.
-pub fn content_hash(text: &str) -> String {
+pub(crate) fn content_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
@@ -58,7 +58,7 @@ pub fn content_hash(text: &str) -> String {
 /// binary, rename, and empty diffs. Returns empty vec for empty or
 /// non-diff input. `buf_start`/`buf_end` reflect the actual line positions
 /// in the full diff text (including file headers).
-pub fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
+pub(crate) fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
     let lines: Vec<&str> = diff_text.lines().collect();
     let mut hunks = Vec::new();
     let mut i = 0;
@@ -141,7 +141,7 @@ fn parse_range(part: &str, prefix: char) -> Option<(usize, usize)> {
 /// `lines` is the full buffer content; `file_path` is the path being displayed.
 /// Returns None for lines outside any hunk. Uses new file line for additions
 /// and context, old file line for deletions.
-pub fn buf_line_to_source(
+pub(crate) fn buf_line_to_source(
     hunks: &[Hunk],
     buf_line: usize,
     lines: &[impl AsRef<str>],
@@ -190,7 +190,7 @@ pub fn buf_line_to_source(
 /// Scans each hunk's content to find where `source_line` appears in the
 /// new-file line numbering. Returns the 0-based buffer line, or `None`
 /// if the line is not covered by any hunk.
-pub fn source_to_buf_line(
+pub(crate) fn source_to_buf_line(
     hunks: &[Hunk],
     source_line: usize,
     lines: &[impl AsRef<str>],
@@ -219,7 +219,7 @@ pub fn source_to_buf_line(
 /// Produces a synthetic all-additions diff for an untracked file.
 ///
 /// Every line is prefixed with `+`. Handles empty file.
-pub fn synthesize_untracked(contents: &str, path: &str) -> String {
+pub(crate) fn synthesize_untracked(contents: &str, path: &str) -> String {
     let mut out = format!("diff --git a/{path} b/{path}\n");
     out.push_str("new file mode 100644\n");
     out.push_str("index 0000000..0000000 100644\n");
@@ -241,11 +241,40 @@ pub fn synthesize_untracked(contents: &str, path: &str) -> String {
     out
 }
 
-/// Extracts a minimal valid git patch for a single hunk from raw diff text.
+/// Builds a minimal patch for a single hunk, suitable for `git apply --cached`.
+///
+/// Extracts the file header (diff --git, index, ---, +++) and the hunk
+/// matching `target_hash` from raw diff text. Returns `None` if the
+/// hunk is not found or the diff has no file header.
+pub(crate) fn build_hunk_patch(diff_text: &str, target_hash: &str) -> Option<String> {
+    let lines: Vec<&str> = diff_text.lines().collect();
+
+    let header_end = lines.iter().position(|l| l.starts_with("@@ "))?;
+    let file_header = &lines[..header_end];
+
+    let hunks = parse_hunks(diff_text);
+    let target = hunks.iter().find(|h| h.content_hash == target_hash)?;
+    let hunk_lines = &lines[target.buf_start..=target.buf_end];
+
+    let mut patch = String::new();
+    for line in file_header {
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    for line in hunk_lines {
+        patch.push_str(line);
+        patch.push('\n');
+    }
+    Some(patch)
+}
+
 /// Compares old content hashes against new hunks.
 ///
 /// Returns buf_start lines for hunks that are new or changed.
-pub fn detect_hunk_changes(old_hashes: &HashSet<String>, new_hunks: &[Hunk]) -> HashSet<usize> {
+pub(crate) fn detect_hunk_changes(
+    old_hashes: &HashSet<String>,
+    new_hunks: &[Hunk],
+) -> HashSet<usize> {
     new_hunks
         .iter()
         .filter(|h| !old_hashes.contains(&h.content_hash))
@@ -465,5 +494,101 @@ index abc..def 100644
     fn source_to_buf_line_empty_hunks() {
         let lines = simple_diff_all_lines();
         assert!(source_to_buf_line(&[], 1, &lines).is_none());
+    }
+
+    #[test]
+    fn build_hunk_patch_single_hunk() {
+        let hunks = parse_hunks(SIMPLE_DIFF);
+        let patch = build_hunk_patch(SIMPLE_DIFF, &hunks[0].content_hash).unwrap();
+        assert!(patch.starts_with("diff --git"));
+        assert!(patch.contains("--- a/src/main.rs"));
+        assert!(patch.contains("+++ b/src/main.rs"));
+        assert!(patch.contains("@@ -1,3 +1,4 @@"));
+        assert!(patch.contains("+    println!(\"goodbye\");"));
+    }
+
+    #[test]
+    fn build_hunk_patch_multi_hunk_selects_correct() {
+        let hunks = parse_hunks(MULTI_HUNK_DIFF);
+        assert_eq!(hunks.len(), 2);
+
+        let patch0 = build_hunk_patch(MULTI_HUNK_DIFF, &hunks[0].content_hash).unwrap();
+        assert!(patch0.contains("@@ -1,2 +1,3 @@"));
+        assert!(!patch0.contains("@@ -5,4 +6,5 @@"));
+
+        let patch1 = build_hunk_patch(MULTI_HUNK_DIFF, &hunks[1].content_hash).unwrap();
+        assert!(patch1.contains("@@ -5,4 +6,5 @@"));
+        assert!(!patch1.contains("@@ -1,2 +1,3 @@"));
+    }
+
+    #[test]
+    fn build_hunk_patch_unknown_hash() {
+        assert!(build_hunk_patch(SIMPLE_DIFF, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn build_hunk_patch_no_header() {
+        assert!(build_hunk_patch("just some text\n", "x").is_none());
+    }
+
+    #[test]
+    fn build_hunk_patch_deletion_only() {
+        let diff = "\
+diff --git a/f.rs b/f.rs
+index 000..111 100644
+--- a/f.rs
++++ b/f.rs
+@@ -1,3 +1,2 @@
+ keep
+-removed
+ also_keep
+";
+        let hunks = parse_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        let patch = build_hunk_patch(diff, &hunks[0].content_hash).unwrap();
+        assert!(patch.contains("-removed"));
+        assert!(patch.contains("@@ -1,3 +1,2 @@"));
+        assert!(patch.starts_with("diff --git"));
+    }
+
+    #[test]
+    fn build_hunk_patch_preserves_full_context() {
+        let diff = "\
+diff --git a/c.rs b/c.rs
+index 000..111 100644
+--- a/c.rs
++++ b/c.rs
+@@ -1,5 +1,5 @@
+ fn main() {
+     let a = 1;
+-    let b = 2;
++    let b = 22;
+     let c = 3;
+ }
+";
+        let hunks = parse_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        let patch = build_hunk_patch(diff, &hunks[0].content_hash).unwrap();
+        assert!(patch.contains(" fn main() {"));
+        assert!(patch.contains("-    let b = 2;"));
+        assert!(patch.contains("+    let b = 22;"));
+        assert!(patch.contains("     let c = 3;"));
+        assert!(patch.contains(" }"));
+    }
+
+    #[test]
+    fn build_hunk_patch_empty_hunk_content() {
+        let diff = "\
+diff --git a/e.rs b/e.rs
+index 000..111 100644
+--- a/e.rs
++++ b/e.rs
+@@ -0,0 +1,1 @@
++new line
+";
+        let hunks = parse_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        let patch = build_hunk_patch(diff, &hunks[0].content_hash).unwrap();
+        assert!(patch.contains("+new line"));
     }
 }

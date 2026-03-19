@@ -12,9 +12,15 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+const CACHE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Persisted review state (file statuses per path).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReviewState {
+    /// Plugin version that wrote this state. Mismatched versions are
+    /// discarded on load to avoid stale-cache bugs across upgrades.
+    #[serde(default)]
+    pub version: String,
     /// File path to file state.
     pub files: HashMap<String, FileState>,
     /// Generalizable coding conventions extracted from resolved threads.
@@ -59,6 +65,8 @@ pub struct SessionsFile {
 /// Container for threads in threads.json.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThreadsFile {
+    #[serde(default)]
+    pub version: String,
     pub threads: Vec<Thread>,
 }
 
@@ -78,7 +86,8 @@ fn ensure_dir(path: &Path) {
     }
 }
 
-/// Loads review state from disk. Returns default if file does not exist or is corrupt.
+/// Loads review state from disk. Returns default if file does not exist,
+/// is corrupt, or was written by a different plugin version.
 pub fn load_review(state_dir: &Path, ws_hash: &str, ref_name: &str) -> ReviewState {
     let ref_safe = sanitize_ref(ref_name);
     let path = state_dir.join(ws_hash).join(format!("{ref_safe}.json"));
@@ -86,18 +95,25 @@ pub fn load_review(state_dir: &Path, ws_hash: &str, ref_name: &str) -> ReviewSta
         Ok(b) => b,
         Err(_) => return ReviewState::default(),
     };
-    serde_json::from_slice(&bytes).unwrap_or_default()
+    let state: ReviewState = serde_json::from_slice(&bytes).unwrap_or_default();
+    if state.version != CACHE_VERSION {
+        return ReviewState::default();
+    }
+    state
 }
 
 /// Saves review state to disk. Creates directories as needed.
+/// Stamps the current plugin version into the state before writing.
 pub fn save_review(state_dir: &Path, ws_hash: &str, ref_name: &str, state: &ReviewState) {
     let ref_safe = sanitize_ref(ref_name);
     let dir = state_dir.join(ws_hash);
     ensure_dir(&dir);
     let path = dir.join(format!("{ref_safe}.json"));
+    let mut versioned = state.clone();
+    versioned.version = CACHE_VERSION.to_string();
     if let Err(e) = fs::write(
         &path,
-        serde_json::to_string_pretty(state).unwrap_or_default(),
+        serde_json::to_string_pretty(&versioned).unwrap_or_default(),
     ) {
         eprintln!(
             "[arbiter] failed to save review state to {}: {e}",
@@ -106,7 +122,8 @@ pub fn save_review(state_dir: &Path, ws_hash: &str, ref_name: &str, state: &Revi
     }
 }
 
-/// Loads threads from disk. Returns empty vec if file does not exist or is corrupt.
+/// Loads threads from disk. Returns empty vec if file does not exist,
+/// is corrupt, or was written by a different plugin version.
 pub fn load_threads(state_dir: &Path, ws_hash: &str, ref_name: &str) -> Vec<Thread> {
     let ref_safe = sanitize_ref(ref_name);
     let path = state_dir
@@ -117,16 +134,21 @@ pub fn load_threads(state_dir: &Path, ws_hash: &str, ref_name: &str) -> Vec<Thre
         Err(_) => return Vec::new(),
     };
     let file: ThreadsFile = serde_json::from_slice(&bytes).unwrap_or_default();
+    if file.version != CACHE_VERSION {
+        return Vec::new();
+    }
     file.threads
 }
 
 /// Saves threads to disk. Creates directories as needed.
+/// Stamps the current plugin version before writing.
 pub fn save_threads(state_dir: &Path, ws_hash: &str, ref_name: &str, threads: &[Thread]) {
     let ref_safe = sanitize_ref(ref_name);
     let dir = state_dir.join(ws_hash);
     ensure_dir(&dir);
     let path = dir.join(format!("{ref_safe}_threads.json"));
     let file = ThreadsFile {
+        version: CACHE_VERSION.to_string(),
         threads: threads.to_vec(),
     };
     if let Err(e) = fs::write(
@@ -278,6 +300,45 @@ mod tests {
     }
 
     #[test]
+    fn load_review_stale_version_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let stale_json = r#"{"version":"0.0.0","files":{"a.rs":{"status":"Approved","content_hash":"abc","updated_at":1,"accepted_hunks":[]}}}"#;
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main.json"), stale_json).unwrap();
+        let loaded = load_review(dir, &ws, "main");
+        assert!(loaded.files.is_empty());
+    }
+
+    #[test]
+    fn load_review_missing_version_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let no_version_json = r#"{"files":{"a.rs":{"status":"Approved","content_hash":"abc","updated_at":1,"accepted_hunks":[]}}}"#;
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main.json"), no_version_json).unwrap();
+        let loaded = load_review(dir, &ws, "main");
+        assert!(loaded.files.is_empty());
+    }
+
+    #[test]
+    fn load_threads_stale_version_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let stale_json = r#"{"version":"0.0.0","threads":[]}"#;
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main_threads.json"), stale_json).unwrap();
+        let loaded = load_threads(dir, &ws, "main");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
     fn save_load_threads_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -322,6 +383,87 @@ mod tests {
         let loaded = load_sessions(dir, &ws);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].session_id, "sess-1");
+    }
+
+    #[test]
+    fn save_review_stamps_current_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let state = ReviewState::default();
+        save_review(dir, &ws, "main", &state);
+
+        let raw = fs::read_to_string(dir.join(&ws).join("main.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["version"].as_str().unwrap(), CACHE_VERSION);
+    }
+
+    #[test]
+    fn save_threads_stamps_current_version() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        save_threads(dir, &ws, "main", &[]);
+
+        let raw = fs::read_to_string(dir.join(&ws).join("main_threads.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["version"].as_str().unwrap(), CACHE_VERSION);
+    }
+
+    #[test]
+    fn load_review_corrupt_json_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main.json"), "{{not valid json!!").unwrap();
+        let loaded = load_review(dir, &ws, "main");
+        assert!(loaded.files.is_empty());
+        assert!(loaded.version.is_empty());
+    }
+
+    #[test]
+    fn load_threads_corrupt_json_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main_threads.json"), "not json").unwrap();
+        let loaded = load_threads(dir, &ws, "main");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_review_ref_with_slash_sanitized() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let state = ReviewState {
+            files: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "x.rs".to_string(),
+                    FileState {
+                        status: ReviewStatus::Approved,
+                        content_hash: "h".to_string(),
+                        updated_at: 1,
+                        accepted_hunks: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+        save_review(dir, &ws, "feature/foo", &state);
+        let loaded = load_review(dir, &ws, "feature/foo");
+        assert_eq!(loaded.files.len(), 1);
+
+        let sanitized = sanitize_ref("feature/foo");
+        assert_eq!(sanitized, "feature_foo");
+        let file_exists = dir.join(&ws).join("feature_foo.json").exists();
+        assert!(file_exists, "file should use sanitized ref name");
     }
 
     #[test]

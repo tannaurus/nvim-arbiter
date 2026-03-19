@@ -5,17 +5,19 @@
 
 use crate::backend;
 use crate::config;
+use crate::config::FilePanelKind;
 use crate::diff::{self, Hunk};
-use crate::file_panel;
+use crate::file_panel::{BuiltinFilePanel, FilePanel, NvimTreeFilePanel};
 use crate::git;
 use crate::poll;
 use crate::prompts;
+use crate::revision;
 use crate::state;
 use crate::threads;
 use crate::types::Role;
 use crate::types::ThreadOrigin;
 use crate::types::ThreadStatus;
-use crate::types::{FileStatus, ReviewStatus};
+use crate::types::{FileStatus, ReviewStatus, ThreadSummary};
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::opts::SetKeymapOpts;
 use nvim_oxi::api::types::Mode;
@@ -58,7 +60,7 @@ fn close_summary_float() {
 
 /// Panel (buffer + window) for file list or diff.
 #[derive(Debug, Clone)]
-pub struct Panel {
+pub(crate) struct Panel {
     /// Buffer handle.
     pub buf: nvim_oxi::api::Buffer,
     /// Window handle.
@@ -67,7 +69,7 @@ pub struct Panel {
 
 /// Side-by-side diff view (ref vs working tree).
 #[derive(Debug, Clone)]
-pub struct SideBySide {
+pub(crate) struct SideBySide {
     /// Buffer for ref content.
     pub old_buf: nvim_oxi::api::Buffer,
     /// Buffer for working tree content.
@@ -78,10 +80,12 @@ pub struct SideBySide {
     pub new_win: nvim_oxi::api::Window,
 }
 
+type BeforeSnapshot = (String, String, HashMap<String, Option<String>>);
+
 /// Central runtime object for the review workbench.
 ///
 /// One exists per open review. Dropped on close.
-pub struct Review {
+pub(crate) struct Review {
     /// Ref to diff against (e.g. "main"); empty = working tree.
     pub ref_name: String,
     /// Working directory captured at open time.
@@ -89,7 +93,7 @@ pub struct Review {
     /// Tabpage handle.
     pub tabpage: nvim_oxi::api::TabPage,
     /// File panel (left).
-    pub file_panel: Panel,
+    pub file_panel: Box<dyn FilePanel>,
     /// Diff panel (right).
     pub diff_panel: Panel,
     /// File list: path, FileStatus, ReviewStatus.
@@ -100,8 +104,6 @@ pub struct Review {
     pub current_file: Option<String>,
     /// Threads for the current ref.
     pub threads: Vec<threads::Thread>,
-    /// Line-to-path mapping for file panel (1-based buffer line -> path).
-    pub file_panel_line_to_path: HashMap<usize, String>,
     /// Thread ID -> buffer line in diff panel.
     pub thread_buf_lines: HashMap<String, usize>,
     /// Hunks for the current file (from last render). Used for ]c/[c.
@@ -116,10 +118,6 @@ pub struct Review {
     pub sbs: Option<SideBySide>,
     /// Plugin config snapshot.
     pub config: config::Config,
-    /// Collapsed directory paths in the file panel.
-    pub collapsed_dirs: std::collections::HashSet<String>,
-    /// Directory path at each buffer line in the file panel (1-based).
-    pub file_panel_line_to_dir: HashMap<usize, String>,
     /// Inline thread indicators: 0-based buffer line -> thread ID.
     /// Placed at the actual diff content line where a thread is anchored.
     pub thread_inline_marks: HashMap<usize, String>,
@@ -131,6 +129,10 @@ pub struct Review {
     /// Per-file accepted hunk content hashes (review checklist).
     /// Used to fold and dim accepted hunks in the diff panel. Persisted in review state.
     pub accepted_hunks: HashMap<String, HashSet<String>>,
+    /// Patches staged by arbiter during this session (content_hash -> patch text).
+    /// Only hunks staged by arbiter are tracked here; pre-existing staged hunks
+    /// are not included, so unstaging only reverses what arbiter staged.
+    pub staged_patches: HashMap<String, String>,
     /// File navigation history for the `file_back` keymap.
     ///
     /// Pushed whenever the user navigates to a different file (next/prev file,
@@ -140,6 +142,9 @@ pub struct Review {
     /// When set, the next diff render will jump to the first (true) or last
     /// (false) unaccepted hunk. Used for cross-file `]c` / `[c` navigation.
     pub pending_hunk_nav: Option<bool>,
+    /// When true, the next diff render will scroll the cursor to line 1.
+    /// Set when advancing to the next unreviewed file after approval.
+    pub pending_scroll_top: bool,
     /// Generalizable coding conventions extracted from resolved threads.
     /// Injected into every thread prompt so the agent "learns" the reviewer's
     /// preferences over the course of the review.
@@ -147,6 +152,28 @@ pub struct Review {
     /// Runtime toggle for the learn_rules feature. Initialized from
     /// `config.learn_rules` and can be toggled with `:ArbiterToggleRules`.
     pub learn_rules: bool,
+    /// Active revision view state. When `Some`, the workbench is showing
+    /// a revision diff instead of the full branch diff.
+    pub revision_view: Option<RevisionViewState>,
+}
+
+/// State for the revision view mode.
+///
+/// When active, the file panel shows only revision files and the diff
+/// panel shows the revision's before/after diff instead of the branch diff.
+pub(crate) struct RevisionViewState {
+    /// Thread ID owning the revision.
+    pub thread_id: String,
+    /// 1-based revision index within the thread.
+    pub revision_index: u32,
+    /// Files from the revision as a simplified file list.
+    pub files: Vec<(String, FileStatus, ReviewStatus)>,
+    /// Currently selected file within the revision.
+    pub current_file: Option<String>,
+    /// Accepted hunk hashes within the revision view.
+    pub accepted_hunks: HashMap<String, HashSet<String>>,
+    /// Saved state from the main compare for restoration on exit.
+    pub saved_file: Option<String>,
 }
 
 /// Runs a closure with the active Review, if one exists.
@@ -154,7 +181,7 @@ pub struct Review {
 /// Returns `None` if no review is active or if the state is already
 /// borrowed (re-entrancy guard). This prevents `RefCell` panics when
 /// Neovim API calls inside the closure trigger autocmds that re-enter.
-pub fn with_active<F, R>(f: F) -> Option<R>
+pub(crate) fn with_active<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut Review) -> R,
 {
@@ -181,12 +208,12 @@ where
 /// Returns true if a review workbench is open.
 ///
 /// Returns `false` if the state is currently borrowed (re-entrancy).
-pub fn is_active() -> bool {
+pub(crate) fn is_active() -> bool {
     ACTIVE.with(|cell| cell.try_borrow().map(|opt| opt.is_some()).unwrap_or(false))
 }
 
 /// Opens the thread window for the thread at the given absolute file path and line.
-pub fn open_thread_at(abs_file: &str, line: u32) {
+pub(crate) fn open_thread_at(abs_file: &str, line: u32) {
     let abs = std::path::Path::new(abs_file);
     with_active(|r| {
         let cwd_path = std::path::Path::new(&r.cwd);
@@ -245,7 +272,7 @@ fn scroll_to_thread_and_open(review: &mut Review, tid: &str) {
 /// Creates tabpage, file panel (left vsplit), diff panel (right), runs
 /// `git::diff_names` and `git::untracked`, loads state, renders file panel,
 /// selects first file, sets keymaps, starts poll timer.
-pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
+pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
     if is_active() {
         let tab_valid =
             with_active(|r| r.tabpage.get_number().is_ok() && r.diff_panel.win.is_valid())
@@ -272,6 +299,7 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
         nvim_oxi::api::Window,
         nvim_oxi::api::Buffer,
         nvim_oxi::api::Window,
+        FilePanelKind,
     )> {
         let mut diff_panel_buf = api::create_buf(false, true)?;
         api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(diff_panel_buf.clone()).build())?;
@@ -285,36 +313,77 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
         api::set_option_value("winbar", " [arbiter] diff", &dp_opts)?;
 
         api::command("topleft vertical 40split")?;
-        let mut file_panel_win = api::get_current_win();
+        let file_panel_win = api::get_current_win();
 
-        let mut file_panel_buf = api::create_buf(false, true)?;
-        api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(file_panel_buf.clone()).build())?;
-        api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(file_panel_buf.clone()).build())?;
-        file_panel_buf.set_name("[arbiter] files")?;
-        file_panel_win.set_buf(&file_panel_buf)?;
-        let fp_opts = OptionOpts::builder().win(file_panel_win.clone()).build();
-        api::set_option_value("foldenable", false, &fp_opts)?;
-        api::set_option_value("winfixwidth", true, &fp_opts)?;
-        api::set_option_value("winbar", " [arbiter] files", &fp_opts)?;
+        let (file_panel_buf, effective_panel) = match config.file_panel {
+            FilePanelKind::Builtin => {
+                let mut buf = api::create_buf(false, true)?;
+                api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(buf.clone()).build())?;
+                api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(buf.clone()).build())?;
+                buf.set_name("[arbiter] files")?;
+                let mut win = file_panel_win.clone();
+                win.set_buf(&buf)?;
+                let fp_opts = OptionOpts::builder().win(file_panel_win.clone()).build();
+                api::set_option_value("foldenable", false, &fp_opts)?;
+                api::set_option_value("winfixwidth", true, &fp_opts)?;
+                api::set_option_value("winbar", " [arbiter] files", &fp_opts)?;
+                (buf, FilePanelKind::Builtin)
+            }
+            FilePanelKind::NvimTree => {
+                let _ = api::set_var("_arbiter_cwd", cwd.as_str());
+                let _ = api::set_var("_arbiter_visible", "[]");
+                let _ = api::set_var("_arbiter_signs", "{}");
+                let _ = api::command(
+                    "lua require('arbiter.nvim_tree_adapter').set_state(vim.g._arbiter_cwd, vim.g._arbiter_visible, vim.g._arbiter_signs)",
+                );
+                let open_ok = api::command(
+                    "lua vim.g._arbiter_nvtree_ok = require('arbiter.nvim_tree_adapter').open(vim.g._arbiter_cwd)"
+                )
+                .is_ok();
+                let tree_ok =
+                    open_ok && api::get_var::<bool>("_arbiter_nvtree_ok").unwrap_or(false);
+                if tree_ok {
+                    (api::get_current_buf(), FilePanelKind::NvimTree)
+                } else {
+                    let mut buf = api::create_buf(false, true)?;
+                    api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(buf.clone()).build())?;
+                    api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(buf.clone()).build())?;
+                    buf.set_name("[arbiter] files")?;
+                    let mut win = file_panel_win.clone();
+                    win.set_buf(&buf)?;
+                    let fp_opts = OptionOpts::builder().win(file_panel_win.clone()).build();
+                    api::set_option_value("foldenable", false, &fp_opts)?;
+                    api::set_option_value("winfixwidth", true, &fp_opts)?;
+                    api::set_option_value("winbar", " [arbiter] files", &fp_opts)?;
+                    let _ = api::notify(
+                        "[arbiter] nvim-tree not available, falling back to builtin panel",
+                        nvim_oxi::api::types::LogLevel::Warn,
+                        &Dictionary::default(),
+                    );
+                    (buf, FilePanelKind::Builtin)
+                }
+            }
+        };
 
         api::command("wincmd l")?;
 
-        Ok((file_panel_buf, file_panel_win, diff_panel_buf, diff_panel_win))
+        Ok((file_panel_buf, file_panel_win, diff_panel_buf, diff_panel_win, effective_panel))
     })();
 
-    let (file_panel_buf, file_panel_win, diff_panel_buf, diff_panel_win) = match setup_result {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = api::set_current_tabpage(&tabpage);
-            let _ = api::command("tabclose");
-            let _ = api::notify(
-                &format!("[arbiter] failed to create panels: {e}"),
-                nvim_oxi::api::types::LogLevel::Error,
-                &Dictionary::default(),
-            );
-            return Ok(());
-        }
-    };
+    let (file_panel_buf, file_panel_win, diff_panel_buf, diff_panel_win, effective_panel) =
+        match setup_result {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = api::set_current_tabpage(&tabpage);
+                let _ = api::command("tabclose");
+                let _ = api::notify(
+                    &format!("[arbiter] failed to create panels: {e}"),
+                    nvim_oxi::api::types::LogLevel::Error,
+                    &Dictionary::default(),
+                );
+                return Ok(());
+            }
+        };
 
     let state_dir = config.state_dir();
     let ws_hash = state::workspace_hash(Path::new(&cwd));
@@ -351,7 +420,7 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
 
             git::untracked(&cwd, {
                 let cwd = cwd.clone();
-                let mut file_panel_buf = file_panel_buf.clone();
+                let file_panel_buf = file_panel_buf.clone();
                 let file_panel_win = file_panel_win.clone();
                 let diff_panel_win = diff_panel_win.clone();
                 let tabpage = tabpage.clone();
@@ -379,24 +448,33 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         file_index.insert(path.clone(), i);
                     }
 
-                    let collapsed = std::collections::HashSet::new();
                     let open_thread_counts = open_thread_count_map(&threads);
-                    let render_result = match file_panel::render(
-                        &mut file_panel_buf,
-                        &files,
-                        &collapsed,
-                        &open_thread_counts,
-                    ) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            let _ = api::set_current_tabpage(&tabpage);
-                            let _ = api::command("tabclose");
-                            let _ = api::notify(
-                                &format!("[arbiter] failed to render file panel: {e}"),
-                                nvim_oxi::api::types::LogLevel::Error,
-                                &Dictionary::default(),
+                    let fp: Box<dyn FilePanel> = match effective_panel {
+                        FilePanelKind::Builtin => {
+                            let mut builtin = BuiltinFilePanel::new(
+                                file_panel_buf.clone(),
+                                file_panel_win.clone(),
                             );
-                            return;
+                            if let Err(e) = builtin.render(&files, &open_thread_counts) {
+                                let _ = api::set_current_tabpage(&tabpage);
+                                let _ = api::command("tabclose");
+                                let _ = api::notify(
+                                    &format!("[arbiter] failed to render file panel: {e}"),
+                                    nvim_oxi::api::types::LogLevel::Error,
+                                    &Dictionary::default(),
+                                );
+                                return;
+                            }
+                            Box::new(builtin)
+                        }
+                        FilePanelKind::NvimTree => {
+                            let mut nvtree = NvimTreeFilePanel::new(
+                                file_panel_buf.clone(),
+                                file_panel_win.clone(),
+                                cwd.clone(),
+                            );
+                            let _ = nvtree.render(&files, &open_thread_counts);
+                            Box::new(nvtree)
                         }
                     };
 
@@ -410,10 +488,7 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         ref_name: ref_name.clone(),
                         cwd: cwd.clone(),
                         tabpage: tabpage.clone(),
-                        file_panel: Panel {
-                            buf: file_panel_buf.clone(),
-                            win: file_panel_win.clone(),
-                        },
+                        file_panel: fp,
                         diff_panel: Panel {
                             buf: diff_panel_buf.clone(),
                             win: diff_panel_win.clone(),
@@ -422,7 +497,6 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         file_index: file_index.clone(),
                         current_file: current_file.clone(),
                         threads: threads.clone(),
-                        file_panel_line_to_path: render_result.line_to_path,
                         thread_buf_lines: HashMap::new(),
                         current_hunks: Vec::new(),
                         file_content_hash: review_state
@@ -435,8 +509,6 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                         side_by_side: false,
                         sbs: None,
                         config: config.clone(),
-                        collapsed_dirs: collapsed,
-                        file_panel_line_to_dir: render_result.line_to_dir,
                         thread_inline_marks: HashMap::new(),
                         pending_thread_open: None,
                         current_diff_text: String::new(),
@@ -446,30 +518,32 @@ pub fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                             .filter(|(_, f)| !f.accepted_hunks.is_empty())
                             .map(|(p, f)| (p.clone(), f.accepted_hunks.iter().cloned().collect()))
                             .collect(),
+                        staged_patches: HashMap::new(),
                         file_history: Vec::new(),
                         pending_hunk_nav: None,
+                        pending_scroll_top: false,
                         review_rules: review_state.review_rules.clone(),
                         learn_rules: config.learn_rules,
+                        revision_view: None,
                     };
 
-                    set_close_keymap(&mut review.file_panel.buf);
+                    set_close_keymap(review.file_panel.buffer_mut());
                     set_close_keymap(&mut review.diff_panel.buf);
-                    set_file_panel_keymaps(&mut review.file_panel.buf);
+                    set_file_panel_keymaps(review.file_panel.buffer_mut());
                     set_diff_panel_keymaps(&mut review.diff_panel.buf, &review.config);
 
                     if let Some(path) = &current_file {
                         select_file_impl(&mut review, path);
-                        let panel_line = review
-                            .file_panel_line_to_path
-                            .iter()
-                            .find(|(_, p)| *p == path)
-                            .map(|(l, _)| *l);
-                        if let Some(line) = panel_line {
-                            let _ = review.file_panel.win.set_cursor(line + 1, 0);
-                        }
+                        review.file_panel.highlight_file(path);
                     }
 
                     poll::start(&cwd);
+
+                    backend::set_on_item_started(Box::new(|tag: &str| {
+                        if threads::window_thread_id().as_deref() == Some(tag) {
+                            let _ = threads::append_status("agent thinking...");
+                        }
+                    }));
 
                     let tab_nr = review.tabpage.get_number().unwrap_or(0);
                     ACTIVE.with(|cell| {
@@ -546,24 +620,23 @@ fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer) {
             with_active(|review| {
                 let (row, _) = review
                     .file_panel
-                    .win
+                    .window()
                     .get_cursor()
                     .into_result()
                     .unwrap_or((1, 0));
                 let line = row;
-                if let Some(path) = file_panel::path_at_line(&review.file_panel_line_to_path, line)
-                {
+                if let Some(path) = review.file_panel.path_at_line(line) {
                     if !ensure_diff_panel(review) {
                         return;
                     }
-                    navigate_to_file(review, &path);
-                    let _ = api::set_current_win(&review.diff_panel.win);
-                } else if let Some(dir) = review.file_panel_line_to_dir.get(&line).cloned() {
-                    if review.collapsed_dirs.contains(&dir) {
-                        review.collapsed_dirs.remove(&dir);
+                    if review.revision_view.is_some() {
+                        render_revision_file(review, &path);
                     } else {
-                        review.collapsed_dirs.insert(dir);
+                        navigate_to_file(review, &path);
                     }
+                    let _ = api::set_current_win(&review.diff_panel.win);
+                } else if let Some(dir) = review.file_panel.dir_at_line(line) {
+                    review.file_panel.toggle_collapse(&dir);
                     rerender_file_panel(review);
                 }
             });
@@ -605,7 +678,21 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
 
     let opts_cancel_request = SetKeymapOpts::builder()
         .callback(|_| {
+            let had_inflight = backend::inflight_tag();
+            let win_tid = threads::window_thread_id();
+            let had_queued = win_tid
+                .as_ref()
+                .and_then(|id| backend::queue_position(id))
+                .is_some();
             backend::cancel_all();
+            let show_interrupted = match (&had_inflight, &win_tid) {
+                (Some(tag), Some(wid)) if tag == wid => true,
+                (_, Some(_)) if had_queued => true,
+                _ => false,
+            };
+            if show_interrupted {
+                let _ = threads::append_interrupted();
+            }
             let _ = api::notify(
                 "[arbiter] cancelled pending requests",
                 nvim_oxi::api::types::LogLevel::Info,
@@ -970,6 +1057,54 @@ fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Conf
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, &file_back, "", &opts_file_back);
+
+    let opts_next_rev = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_next_revision);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "]r", "", &opts_next_rev);
+
+    let opts_prev_rev = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_prev_revision);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "[r", "", &opts_prev_rev);
+
+    let opts_enter_rev = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_enter_revision_view);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<Leader>rv", "", &opts_enter_rev);
+
+    let opts_exit_rev = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(|r| {
+                if r.revision_view.is_some() {
+                    exit_revision_view(r);
+                }
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<Esc>", "", &opts_exit_rev);
 }
 
 fn nav_next_hunk(review: &mut Review) {
@@ -1004,7 +1139,7 @@ fn nav_prev_hunk(review: &mut Review) {
     let prev = review
         .current_hunks
         .iter()
-        .rfind(|h| h.buf_start < line_0 && !accepted.contains(&h.content_hash));
+        .rfind(|h| h.buf_end < line_0 && !accepted.contains(&h.content_hash));
     if let Some(hunk) = prev {
         scroll_to_hunk(review, hunk.buf_start, hunk.buf_end);
         return;
@@ -1013,10 +1148,10 @@ fn nav_prev_hunk(review: &mut Review) {
 }
 
 fn nav_hunk_cross_file(review: &mut Review, forward: bool) {
-    let Some(ref path) = review.current_file else {
+    let Some(path) = review.current_file.clone() else {
         return;
     };
-    let idx = review.file_index.get(path).copied().unwrap_or(0);
+    let idx = review.file_index.get(&path).copied().unwrap_or(0);
     let len = review.files.len();
     if len == 0 {
         return;
@@ -1063,6 +1198,38 @@ fn apply_pending_hunk_nav(review: &mut Review) {
     }
 }
 
+fn apply_pending_scroll_top(review: &mut Review) {
+    if !review.pending_scroll_top {
+        return;
+    }
+    review.pending_scroll_top = false;
+    let _ = review.diff_panel.win.set_cursor(1, 0);
+}
+
+/// Moves the cursor to the first hunk if it is not already inside one.
+///
+/// Called after rendering so the cursor never sits on a thread summary
+/// or file header line where `<Leader>as` and `<Leader>aa` would silently
+/// do the wrong thing.
+fn snap_cursor_to_hunk(review: &mut Review, hunks: &[Hunk]) {
+    if hunks.is_empty() {
+        return;
+    }
+    let (row, _) = review
+        .diff_panel
+        .win
+        .get_cursor()
+        .into_result()
+        .unwrap_or((1, 0));
+    let line_0 = row.saturating_sub(1);
+    let inside = hunks
+        .iter()
+        .any(|h| line_0 >= h.buf_start && line_0 <= h.buf_end);
+    if !inside {
+        let _ = review.diff_panel.win.set_cursor(hunks[0].buf_start + 1, 0);
+    }
+}
+
 fn accepted_for_file(review: &Review) -> HashSet<String> {
     review
         .current_file
@@ -1095,8 +1262,42 @@ fn handle_accept_hunk(review: &mut Review) {
     };
     let hash = hunk.content_hash.clone();
 
+    if review.revision_view.is_some() {
+        accept_revision_hunk(review, &hash);
+        return;
+    }
+
     let file_set = accepted_for_file(review);
-    if file_set.contains(&hash) {
+    let is_accepted = file_set.contains(&hash);
+
+    if review.ref_name.is_empty() {
+        let patch = if is_accepted {
+            review.staged_patches.get(&hash).cloned()
+        } else {
+            diff::build_hunk_patch(&review.current_diff_text, &hash)
+        };
+        if let Some(patch) = patch {
+            if is_accepted {
+                let result = git::unstage_patch(&review.cwd, &patch);
+                if !result.success() {
+                    let _ = api::notify(
+                        &format!("[arbiter] unstage failed: {}", result.stderr.trim()),
+                        nvim_oxi::api::types::LogLevel::Error,
+                        &Dictionary::default(),
+                    );
+                    return;
+                }
+                review.staged_patches.remove(&hash);
+            } else {
+                let result = git::stage_patch(&review.cwd, &patch);
+                if result.success() {
+                    review.staged_patches.insert(hash.clone(), patch);
+                }
+            }
+        }
+    }
+
+    if is_accepted {
         unmark_hunk_accepted(review, &hash);
         if let Some(path) = review.current_file.clone() {
             if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
@@ -1130,6 +1331,129 @@ fn handle_accept_hunk(review: &mut Review) {
     save_accepted_hunks(review);
     save_file_statuses(review);
     rerender_file_panel(review);
+}
+
+fn accept_revision_hunk(review: &mut Review, hash: &str) {
+    let Some(rv) = review.revision_view.as_mut() else {
+        return;
+    };
+    let Some(path) = rv.current_file.clone() else {
+        return;
+    };
+
+    let already = rv
+        .accepted_hunks
+        .get(&path)
+        .is_some_and(|s| s.contains(hash));
+    if already {
+        if let Some(set) = rv.accepted_hunks.get_mut(&path) {
+            set.remove(hash);
+        }
+    } else {
+        rv.accepted_hunks
+            .entry(path.clone())
+            .or_default()
+            .insert(hash.to_string());
+        map_revision_hunk_to_main(review, &path, hash);
+    }
+
+    render_revision_file(review, &path);
+}
+
+fn accept_all_revision_hunks(review: &mut Review) {
+    let path = review
+        .revision_view
+        .as_ref()
+        .and_then(|rv| rv.current_file.clone());
+    let Some(path) = path else {
+        return;
+    };
+
+    let all_hashes: Vec<String> = review
+        .current_hunks
+        .iter()
+        .map(|h| h.content_hash.clone())
+        .collect();
+
+    if let Some(rv) = review.revision_view.as_mut() {
+        rv.accepted_hunks
+            .entry(path.clone())
+            .or_default()
+            .extend(all_hashes.iter().cloned());
+    }
+
+    review
+        .accepted_hunks
+        .entry(path.clone())
+        .or_default()
+        .extend(all_hashes.iter().cloned());
+    save_accepted_hunks(review);
+
+    let (rev_files, thread_id, rev_idx) = match review.revision_view.as_ref() {
+        Some(rv) => (rv.files.clone(), rv.thread_id.clone(), rv.revision_index),
+        None => return,
+    };
+
+    let cur_idx = rev_files.iter().position(|(p, _, _)| *p == path);
+    let all_rev_accepted = rev_files.iter().all(|(fp, _, _)| {
+        let rev_file = review
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .and_then(|t| t.revisions.iter().find(|r| r.index == rev_idx))
+            .and_then(|r| r.files.iter().find(|f| f.path == *fp));
+        let Some(rf) = rev_file else {
+            return true;
+        };
+        let diff = revision::revision_file_diff(rf);
+        let hunks = diff::parse_hunks(&diff);
+        let accepted_set = review
+            .revision_view
+            .as_ref()
+            .and_then(|rv| rv.accepted_hunks.get(fp))
+            .cloned()
+            .unwrap_or_default();
+        hunks.iter().all(|h| accepted_set.contains(&h.content_hash))
+    });
+
+    if all_rev_accepted {
+        let _ = api::notify(
+            "[arbiter] all hunks in this revision accepted",
+            nvim_oxi::api::types::LogLevel::Info,
+            &Dictionary::default(),
+        );
+        render_revision_file(review, &path);
+    } else if let Some(idx) = cur_idx {
+        let next = (idx + 1) % rev_files.len().max(1);
+        if let Some(next_path) = rev_files.get(next).map(|(p, _, _)| p.clone()) {
+            render_revision_file(review, &next_path);
+        }
+    } else {
+        render_revision_file(review, &path);
+    }
+}
+
+/// Maps an accepted revision hunk to the main branch diff.
+///
+/// Finds the hunk in the main diff by matching content hashes. If the
+/// revision hunk's hash exists in the main diff, it is marked as accepted
+/// there too. If not (stale), the user is notified.
+fn map_revision_hunk_to_main(review: &mut Review, path: &str, rev_hash: &str) {
+    let main_has_hash = review
+        .accepted_hunks
+        .get(path)
+        .map(|s| s.contains(rev_hash))
+        .unwrap_or(false);
+    if main_has_hash {
+        return;
+    }
+
+    review
+        .accepted_hunks
+        .entry(path.to_string())
+        .or_default()
+        .insert(rev_hash.to_string());
+    save_accepted_hunks(review);
 }
 
 fn mark_hunk_accepted(review: &mut Review, content_hash: &str) {
@@ -1180,9 +1504,61 @@ fn unmark_hunk_accepted(review: &mut Review, content_hash: &str) {
         }
     }
 
-    if let Some(path) = review.current_file.clone() {
-        select_file_impl(review, &path);
-    }
+    reapply_diff_visuals(review);
+}
+
+fn reapply_diff_visuals(review: &mut Review) {
+    let file_accepted = accepted_for_file(review);
+    let accepted_buf_starts: HashSet<usize> = review
+        .current_hunks
+        .iter()
+        .filter(|h| file_accepted.contains(&h.content_hash))
+        .map(|h| h.buf_start)
+        .collect();
+
+    let lc = review.diff_panel.buf.line_count().unwrap_or(0);
+    let all_lines: Vec<String> = review
+        .diff_panel
+        .buf
+        .get_lines(0..lc, false)
+        .map(|iter| iter.map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
+    let file_threads: Vec<threads::Thread> = review
+        .current_file
+        .as_ref()
+        .map(|p| {
+            threads::for_file(&review.threads, p)
+                .into_iter()
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let summaries = threads::to_summaries(&file_threads);
+    let summary_refs: Vec<&ThreadSummary> = summaries.iter().collect();
+
+    let _ = diff::apply_highlights(
+        &mut review.diff_panel.buf,
+        &review.current_hunks,
+        &summary_refs,
+        &all_lines,
+        None,
+        &accepted_buf_starts,
+    );
+
+    let file_approved = review
+        .current_file
+        .as_ref()
+        .and_then(|p| review.files.iter().find(|(fp, _, _)| fp == p))
+        .is_some_and(|(_, _, rs)| *rs == ReviewStatus::Approved);
+
+    let _ = diff::set_hunk_folds(
+        &mut review.diff_panel.buf,
+        &review.diff_panel.win,
+        &review.current_hunks,
+        review.config.review.fold_approved && file_approved,
+        &accepted_buf_starts,
+    );
 }
 
 fn resolve_threads_in_range(review: &mut Review, path: &str, new_start: usize, new_count: usize) {
@@ -1337,10 +1713,22 @@ fn save_accepted_hunks(review: &Review) {
 }
 
 fn nav_next_file(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+    if let Some(rv) = &review.revision_view {
+        let cur = rv.current_file.as_deref();
+        let files = &rv.files;
+        let idx = cur
+            .and_then(|c| files.iter().position(|(p, _, _)| p == c))
+            .unwrap_or(0);
+        let next = (idx + 1) % files.len().max(1);
+        if let Some(path) = files.get(next).map(|(p, _, _)| p.clone()) {
+            render_revision_file(review, &path);
+        }
+        return;
+    }
+    let Some(path) = review.current_file.clone() else {
         return;
     };
-    let idx = review.file_index.get(path).copied().unwrap_or(0);
+    let idx = review.file_index.get(&path).copied().unwrap_or(0);
     let next_idx = (idx + 1) % review.files.len().max(1);
     let path = review.files.get(next_idx).map(|(p, _, _)| p.clone());
     if let Some(path) = path {
@@ -1349,10 +1737,26 @@ fn nav_next_file(review: &mut Review) {
 }
 
 fn nav_prev_file(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+    if let Some(rv) = &review.revision_view {
+        let cur = rv.current_file.as_deref();
+        let files = &rv.files;
+        let idx = cur
+            .and_then(|c| files.iter().position(|(p, _, _)| p == c))
+            .unwrap_or(0);
+        let prev = if idx == 0 {
+            files.len().saturating_sub(1)
+        } else {
+            idx - 1
+        };
+        if let Some(path) = files.get(prev).map(|(p, _, _)| p.clone()) {
+            render_revision_file(review, &path);
+        }
+        return;
+    }
+    let Some(path) = review.current_file.clone() else {
         return;
     };
-    let idx = review.file_index.get(path).copied().unwrap_or(0);
+    let idx = review.file_index.get(&path).copied().unwrap_or(0);
     let prev_idx = if idx == 0 {
         review.files.len().saturating_sub(1)
     } else {
@@ -1405,6 +1809,7 @@ fn handle_next_unreviewed(review: &mut Review) {
         if is_unreviewed_file(review, idx) {
             if let Some((path, _, _)) = review.files.get(idx) {
                 let path = path.clone();
+                review.pending_scroll_top = true;
                 navigate_to_file(review, &path);
             }
             return;
@@ -1435,6 +1840,7 @@ fn handle_prev_unreviewed(review: &mut Review) {
         if is_unreviewed_file(review, idx) {
             if let Some((path, _, _)) = review.files.get(idx) {
                 let path = path.clone();
+                review.pending_scroll_top = true;
                 navigate_to_file(review, &path);
             }
             return;
@@ -1510,7 +1916,23 @@ fn make_thread_reply_callback(
                         let file_notify = file_for_notify.clone();
                         let reply_tag = tid.clone();
                         let status_tid = tid.clone();
+                        let was_inflight = backend::inflight_tag().as_deref() == Some(tid.as_str());
+                        let was_queued = backend::queue_position(&tid).is_some();
                         backend::cancel_tagged(&tid);
+                        if (was_inflight || was_queued)
+                            && threads::window_thread_id().as_deref() == Some(tid.as_str())
+                        {
+                            let _ = threads::append_interrupted();
+                        }
+                        let before_snapshot = {
+                            let paths: Vec<String> =
+                                r.files.iter().map(|(p, _, _)| p.clone()).collect();
+                            Some((
+                                r.cwd.clone(),
+                                r.ref_name.clone(),
+                                revision::snapshot_files(&r.cwd, &paths),
+                            ))
+                        };
                         backend::thread_reply(
                             session_id.as_deref(),
                             &prompt,
@@ -1522,7 +1944,7 @@ fn make_thread_reply_callback(
                                     .map(|e| format!("[Error] {e}"))
                                     .unwrap_or(res.text);
                                 let had_error = res.error.is_some();
-                                if let Some(ref e) = res.error {
+                                if let Some(e) = res.error.as_ref() {
                                     backend::notify_if_missing_binary(e);
                                     let _ = api::notify(
                                         &format!("Reply failed: {e}"),
@@ -1539,9 +1961,11 @@ fn make_thread_reply_callback(
                                         if !res.session_id.is_empty() {
                                             t.session_id = Some(res.session_id);
                                         }
+                                        if !had_error {
+                                            maybe_capture_revision(r, &tid, &before_snapshot);
+                                        }
                                         state::save_threads(&sd, &ws, &rn, &r.threads);
-                                        if let Some(ref p) = r.current_file {
-                                            let p = p.clone();
+                                        if let Some(p) = r.current_file.clone() {
                                             select_file_impl(r, &p);
                                         }
                                     }
@@ -1564,8 +1988,7 @@ fn make_thread_reply_callback(
                         );
                         show_thread_queue_status(&status_tid);
                         state::save_threads(&sd2, &ws2, &rn2, &r.threads);
-                        if let Some(ref p) = r.current_file {
-                            let p = p.clone();
+                        if let Some(p) = r.current_file.clone() {
                             select_file_impl(r, &p);
                         }
                     }
@@ -1580,6 +2003,9 @@ fn open_thread_panel(review: &Review, t: &threads::Thread) {
     clear_thread_anchor();
     let on_reply = make_thread_reply_callback(t.id.clone(), t.file.clone(), t.line);
     let on_close: threads::OnClose = Arc::new(clear_thread_anchor);
+    let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx| {
+        with_active(|r| handle_revision_selected(r, rev_idx));
+    });
     let _ = threads::window_open(
         &t.id,
         &t.file,
@@ -1587,7 +2013,19 @@ fn open_thread_panel(review: &Review, t: &threads::Thread) {
         &t.messages,
         on_reply,
         Some(on_close),
+        Some(on_revision),
     );
+    for rev in &t.revisions {
+        let stats: Vec<(String, usize, usize)> = rev
+            .files
+            .iter()
+            .map(|rf| {
+                let (a, r) = revision::revision_file_stats(rf);
+                (rf.path.clone(), a, r)
+            })
+            .collect();
+        let _ = threads::append_revision_summary(rev.index, rev.files.len(), &stats);
+    }
     place_thread_anchor(review, t.line);
     let is_inflight = backend::inflight_tag().as_deref() == Some(&t.id);
     let is_queued = backend::queue_position(&t.id).is_some();
@@ -1596,7 +2034,7 @@ fn open_thread_panel(review: &Review, t: &threads::Thread) {
     }
 }
 
-pub fn open_active_thread(review: &mut Review) {
+pub(crate) fn open_active_thread(review: &mut Review) {
     let Some(tid) = backend::inflight_tag() else {
         let _ = api::notify(
             "[arbiter] no active thread",
@@ -1684,7 +2122,7 @@ fn handle_diff_cr(review: &mut Review) {
         return;
     }
 
-    if let Some(ref path) = review.current_file {
+    if let Some(path) = review.current_file.clone() {
         let lc = review.diff_panel.buf.line_count().unwrap_or(1);
         let lines: Vec<String> = (0..lc)
             .map(|i| {
@@ -1700,7 +2138,7 @@ fn handle_diff_cr(review: &mut Review) {
             .collect();
         let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
         if let Some(loc) =
-            diff::buf_line_to_source(&review.current_hunks, buf_line_0, &line_refs, path)
+            diff::buf_line_to_source(&review.current_hunks, buf_line_0, &line_refs, &path)
         {
             let full = Path::new(&review.cwd).join(&loc.file);
             if full.exists() {
@@ -1750,7 +2188,7 @@ fn handle_open_thread(review: &mut Review) {
 
 fn handle_toggle_sbs(review: &mut Review) {
     if review.side_by_side {
-        if let Some(ref sbs) = review.sbs {
+        if let Some(sbs) = review.sbs.as_ref() {
             let _ =
                 diff::close_side_by_side(&sbs.old_buf, &sbs.old_win, &sbs.new_buf, &sbs.new_win);
         }
@@ -1758,13 +2196,13 @@ fn handle_toggle_sbs(review: &mut Review) {
         review.side_by_side = false;
         return;
     }
-    let Some(ref path) = review.current_file else {
+    let Some(path) = review.current_file.clone() else {
         return;
     };
     let is_untracked = review
         .files
         .iter()
-        .find(|(p, _, _)| p == path)
+        .find(|(p, _, _)| *p == path)
         .map(|(_, fs, _)| *fs == FileStatus::Untracked)
         .unwrap_or(false);
     let cwd = review.cwd.clone();
@@ -1817,6 +2255,11 @@ fn handle_ga(review: &mut Review) {
         return;
     }
 
+    if review.revision_view.is_some() {
+        accept_all_revision_hunks(review);
+        return;
+    }
+
     let Some(path) = review.current_file.clone() else {
         return;
     };
@@ -1833,7 +2276,26 @@ fn handle_ga(review: &mut Review) {
     if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
         *rs = new_status;
     }
+    let working_tree = review.ref_name.is_empty();
+
     if new_status == ReviewStatus::Approved {
+        if working_tree {
+            let file_accepted = accepted_for_file(review);
+            for h in &review.current_hunks {
+                if file_accepted.contains(&h.content_hash) {
+                    continue;
+                }
+                if let Some(patch) =
+                    diff::build_hunk_patch(&review.current_diff_text, &h.content_hash)
+                {
+                    let result = git::stage_patch(&review.cwd, &patch);
+                    if result.success() {
+                        review.staged_patches.insert(h.content_hash.clone(), patch);
+                    }
+                }
+            }
+        }
+
         let full = Path::new(&review.cwd).join(&path);
         let contents = std::fs::read_to_string(&full).unwrap_or_default();
         let hash = state::content_hash(&contents);
@@ -1851,6 +2313,28 @@ fn handle_ga(review: &mut Review) {
         rerender_file_panel(review);
         handle_next_unreviewed(review);
     } else {
+        if working_tree {
+            let accepted = review
+                .accepted_hunks
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            for hash in &accepted {
+                if let Some(patch) = review.staged_patches.get(hash) {
+                    let result = git::unstage_patch(&review.cwd, patch);
+                    if result.success() {
+                        review.staged_patches.remove(hash);
+                    } else {
+                        let _ = api::notify(
+                            &format!("[arbiter] unstage failed: {}", result.stderr.trim()),
+                            nvim_oxi::api::types::LogLevel::Error,
+                            &Dictionary::default(),
+                        );
+                    }
+                }
+            }
+        }
+
         review.file_content_hash.remove(&path);
         review.accepted_hunks.remove(&path);
 
@@ -1902,7 +2386,7 @@ fn hunk_at_cursor(review: &Review) -> Option<&Hunk> {
         .find(|h| line >= h.buf_start && line <= h.buf_end)
 }
 
-pub fn show_summary(review: &mut Review) {
+pub(crate) fn show_summary(review: &mut Review) {
     let approved = review
         .files
         .iter()
@@ -2133,8 +2617,7 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                 let state_dir = r.config.state_dir();
                 let ws_hash = state::workspace_hash(Path::new(&r.cwd));
                 state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
-                if let Some(ref p) = r.current_file {
-                    let p = p.clone();
+                if let Some(p) = r.current_file.clone() {
                     select_file_impl(r, &p);
                 }
                 thread
@@ -2144,6 +2627,9 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
             let tid = thread.id.clone();
             let on_reply = make_thread_reply_callback(tid.clone(), path.clone(), line);
             let on_close: threads::OnClose = Arc::new(clear_thread_anchor);
+            let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx| {
+                with_active(|r| handle_revision_selected(r, rev_idx));
+            });
             let _ = threads::window_open(
                 &thread.id,
                 &thread.file,
@@ -2151,6 +2637,7 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                 &thread.messages,
                 on_reply,
                 Some(on_close),
+                Some(on_revision),
             );
             with_active(|r| place_thread_anchor(r, thread.line));
 
@@ -2186,6 +2673,14 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
             let comment_tag = tid.clone();
             let window_tid = tid.clone();
             let status_tid = tid.clone();
+            let before_snapshot = with_active(|r| {
+                let paths: Vec<String> = r.files.iter().map(|(p, _, _)| p.clone()).collect();
+                (
+                    r.cwd.clone(),
+                    r.ref_name.clone(),
+                    revision::snapshot_files(&r.cwd, &paths),
+                )
+            });
             backend::send_comment(
                 &prompt,
                 Some(on_stream),
@@ -2211,12 +2706,14 @@ fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
                         if let Some(t) = r.threads.iter_mut().find(|t| t.id == tid) {
                             t.session_id = Some(res.session_id.clone()).filter(|s| !s.is_empty());
                             threads::add_message(t, Role::Agent, &msg);
+                            if !had_error {
+                                maybe_capture_revision(r, &tid, &before_snapshot);
+                            }
                         }
                         let state_dir = r.config.state_dir();
                         let ws_hash = state::workspace_hash(Path::new(&r.cwd));
                         state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
-                        if let Some(ref p) = r.current_file {
-                            let p = p.clone();
+                        if let Some(p) = r.current_file.clone() {
                             select_file_impl(r, &p);
                         }
                         if !had_error {
@@ -2442,8 +2939,7 @@ fn handle_list_threads_filtered(review: &mut Review, opts: threads::FilterOpts) 
                     guard.line_map = new_content.line_map;
                 }
 
-                if let Some(ref p) = r.current_file {
-                    let p = p.clone();
+                if let Some(p) = r.current_file.clone() {
                     select_file_impl(r, &p);
                 }
             });
@@ -2562,11 +3058,243 @@ fn handle_resolve_thread(review: &mut Review) {
         let state_dir = review.config.state_dir();
         let ws_hash = state::workspace_hash(Path::new(&review.cwd));
         state::save_threads(&state_dir, &ws_hash, &review.ref_name, &review.threads);
-        if let Some(ref p) = review.current_file {
-            let p = p.clone();
+        if let Some(p) = review.current_file.clone() {
             select_file_impl(review, &p);
         }
     }
+}
+
+/// Captures a revision on the thread if the agent modified any files.
+///
+/// `before_snapshot` is a tuple of (cwd, ref_name, file_contents) captured
+/// before the backend call was dispatched.
+fn maybe_capture_revision(
+    review: &mut Review,
+    thread_id: &str,
+    before_snapshot: &Option<BeforeSnapshot>,
+) {
+    let Some((cwd, ref_name, before)) = before_snapshot.as_ref() else {
+        return;
+    };
+    let paths: Vec<String> = review.files.iter().map(|(p, _, _)| p.clone()).collect();
+    let mut after = revision::snapshot_files(cwd, &paths);
+    let new_paths = revision::diff_names_sync(cwd, ref_name);
+    for path in &new_paths {
+        if !after.contains_key(path) {
+            let full = Path::new(cwd).join(path);
+            after.insert(path.clone(), std::fs::read_to_string(&full).ok());
+        }
+    }
+    let Some(t) = review.threads.iter().find(|t| t.id == thread_id) else {
+        return;
+    };
+    let msg_idx = t.messages.len().saturating_sub(1);
+    let Some(rev) = revision::build_revision(t, before, &after, &new_paths, msg_idx) else {
+        return;
+    };
+    let rev_index = rev.index;
+    let file_count = rev.files.len();
+    let stats: Vec<(String, usize, usize)> = rev
+        .files
+        .iter()
+        .map(|rf| {
+            let (a, r) = revision::revision_file_stats(rf);
+            (rf.path.clone(), a, r)
+        })
+        .collect();
+    if let Some(t) = review.threads.iter_mut().find(|t| t.id == thread_id) {
+        t.revisions.push(rev);
+    }
+    if threads::window_thread_id().as_deref() == Some(thread_id) {
+        let _ = threads::append_revision_summary(rev_index, file_count, &stats);
+    }
+}
+
+fn enter_revision_view(review: &mut Review, thread_id: &str, rev_index: u32) {
+    let Some(t) = review.threads.iter().find(|t| t.id == thread_id) else {
+        api::err_writeln("[arbiter] thread not found");
+        return;
+    };
+    let Some(rev) = t.revisions.iter().find(|r| r.index == rev_index) else {
+        api::err_writeln("[arbiter] revision not found");
+        return;
+    };
+
+    let files: Vec<(String, FileStatus, ReviewStatus)> = rev
+        .files
+        .iter()
+        .map(|rf| {
+            let status = if rf.before.is_none() {
+                FileStatus::Added
+            } else if rf.after.is_none() {
+                FileStatus::Deleted
+            } else {
+                FileStatus::Modified
+            };
+            (rf.path.clone(), status, ReviewStatus::Unreviewed)
+        })
+        .collect();
+
+    let first_file = files.first().map(|(p, _, _)| p.clone());
+    let saved_file = review.current_file.clone();
+
+    review.revision_view = Some(RevisionViewState {
+        thread_id: thread_id.to_string(),
+        revision_index: rev_index,
+        files: files.clone(),
+        current_file: first_file.clone(),
+        accepted_hunks: HashMap::new(),
+        saved_file,
+    });
+
+    let open_thread_counts = HashMap::new();
+    let _ = review.file_panel.render(&files, &open_thread_counts);
+
+    if let Some(path) = first_file {
+        render_revision_file(review, &path);
+    }
+}
+
+fn exit_revision_view(review: &mut Review) {
+    let saved_file = review
+        .revision_view
+        .as_ref()
+        .and_then(|rv| rv.saved_file.clone());
+    review.revision_view = None;
+
+    let open_thread_counts = open_thread_count_map(&review.threads);
+    let _ = review.file_panel.render(&review.files, &open_thread_counts);
+
+    if let Some(path) = saved_file.or_else(|| review.current_file.clone()) {
+        select_file_impl(review, &path);
+    }
+}
+
+fn render_revision_file(review: &mut Review, path: &str) {
+    let Some(rv) = review.revision_view.as_mut() else {
+        return;
+    };
+    rv.current_file = Some(path.to_string());
+    review.file_panel.highlight_file(path);
+
+    let rev_data = {
+        let t = review.threads.iter().find(|t| t.id == rv.thread_id);
+        t.and_then(|t| t.revisions.iter().find(|r| r.index == rv.revision_index))
+            .and_then(|r| r.files.iter().find(|f| f.path == path))
+            .cloned()
+    };
+    let Some(rf) = rev_data else {
+        return;
+    };
+
+    let diff_text = revision::revision_file_diff(&rf);
+    review.current_diff_text = diff_text.clone();
+
+    let accepted = rv.accepted_hunks.get(path).cloned().unwrap_or_default();
+    let summaries = Vec::new();
+    if let Ok((hunks, thread_buf_lines)) = diff::render(
+        &mut review.diff_panel.buf,
+        &diff_text,
+        &summaries,
+        path,
+        false,
+        None,
+        &accepted,
+    ) {
+        review.current_hunks = hunks.clone();
+        review.thread_buf_lines = thread_buf_lines;
+        let accepted_buf_starts: HashSet<usize> = hunks
+            .iter()
+            .filter(|h| accepted.contains(&h.content_hash))
+            .map(|h| h.buf_start)
+            .collect();
+        if !hunks.is_empty() {
+            let _ = diff::set_hunk_folds(
+                &mut review.diff_panel.buf,
+                &review.diff_panel.win,
+                &hunks,
+                false,
+                &accepted_buf_starts,
+            );
+        }
+    }
+
+    let rv = review.revision_view.as_ref();
+    if let Some(rv) = rv {
+        let total = review
+            .threads
+            .iter()
+            .find(|t| t.id == rv.thread_id)
+            .map(|t| t.revisions.len() as u32)
+            .unwrap_or(0);
+        let title = format!(" {path} (revision {} of {total})", rv.revision_index);
+        let win_opts = OptionOpts::builder()
+            .win(review.diff_panel.win.clone())
+            .build();
+        let _ = api::set_option_value("winbar", title.as_str(), &win_opts);
+    }
+}
+
+fn handle_next_revision(review: &mut Review) {
+    if let Some(rv) = &review.revision_view {
+        let tid = rv.thread_id.clone();
+        let next = rv.revision_index + 1;
+        let exists = review
+            .threads
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| t.revisions.iter().any(|r| r.index == next))
+            .unwrap_or(false);
+        if exists {
+            enter_revision_view(review, &tid, next);
+        } else {
+            api::err_writeln("[arbiter] no next revision");
+        }
+    } else {
+        handle_enter_revision_view(review);
+    }
+}
+
+fn handle_prev_revision(review: &mut Review) {
+    if let Some(rv) = &review.revision_view {
+        if rv.revision_index <= 1 {
+            api::err_writeln("[arbiter] no previous revision");
+            return;
+        }
+        let tid = rv.thread_id.clone();
+        let prev = rv.revision_index - 1;
+        enter_revision_view(review, &tid, prev);
+    } else {
+        handle_enter_revision_view(review);
+    }
+}
+
+fn handle_revision_selected(review: &mut Review, rev_index: u32) {
+    let tid = threads::window_thread_id();
+    let Some(tid) = tid else {
+        return;
+    };
+    enter_revision_view(review, &tid, rev_index);
+}
+
+fn handle_enter_revision_view(review: &mut Review) {
+    let tid = threads::window_thread_id();
+    let Some(tid) = tid else {
+        api::err_writeln("[arbiter] no thread open");
+        return;
+    };
+    let Some(t) = review.threads.iter().find(|t| t.id == tid) else {
+        return;
+    };
+    if t.revisions.is_empty() {
+        let _ = api::notify(
+            "[arbiter] this thread has no revisions",
+            nvim_oxi::api::types::LogLevel::Info,
+            &Dictionary::default(),
+        );
+        return;
+    }
+    enter_revision_view(review, &tid, 1);
 }
 
 /// Queues a rule-extraction call at the front of the backend queue
@@ -2589,7 +3317,8 @@ fn maybe_queue_extraction(review: &Review, thread_id: &str) {
             (role.to_string(), m.text.clone())
         })
         .collect();
-    let Some(prompt) = prompts::format_extraction_prompt(&messages) else {
+    let existing_rules = review.review_rules.clone();
+    let Some(prompt) = prompts::format_extraction_prompt(&messages, &existing_rules) else {
         return;
     };
     let tid = thread_id.to_string();
@@ -2605,20 +3334,32 @@ fn maybe_queue_extraction(review: &Review, thread_id: &str) {
             if res.error.is_some() {
                 return;
             }
-            let new_rules = prompts::parse_extraction_response(&res.text);
-            if new_rules.is_empty() {
+            let actions = prompts::parse_extraction_response(&res.text);
+            if actions.is_empty() {
                 return;
             }
             with_active(|r| {
-                let added: Vec<String> = new_rules
-                    .into_iter()
-                    .filter(|rule| !r.review_rules.contains(rule))
-                    .collect();
-                r.review_rules.extend(added.iter().cloned());
-                if !added.is_empty() {
+                let mut changed = Vec::new();
+                for action in actions {
+                    match action {
+                        prompts::ExtractionAction::Add(rule) => {
+                            if !r.review_rules.contains(&rule) {
+                                r.review_rules.push(rule.clone());
+                                changed.push(rule);
+                            }
+                        }
+                        prompts::ExtractionAction::Rephrase { old, new } => {
+                            if let Some(pos) = r.review_rules.iter().position(|r| *r == old) {
+                                r.review_rules[pos] = new.clone();
+                                changed.push(format!("{old} -> {new}"));
+                            }
+                        }
+                    }
+                }
+                if !changed.is_empty() {
                     save_file_statuses(r);
                     if threads::window_thread_id().as_deref() == Some(tid.as_str()) {
-                        let _ = threads::append_learned_rules(&added);
+                        let _ = threads::append_learned_rules(&changed);
                     }
                 }
             });
@@ -2628,8 +3369,8 @@ fn maybe_queue_extraction(review: &Review, thread_id: &str) {
 
 fn handle_g_q(review: &mut Review) {
     review.show_resolved = !review.show_resolved;
-    if let Some(ref path) = review.current_file.clone() {
-        select_file_impl(review, path);
+    if let Some(path) = review.current_file.clone() {
+        select_file_impl(review, &path);
     }
 }
 
@@ -2668,8 +3409,7 @@ fn handle_reanchor(review: &mut Review) {
                     let state_dir = r.config.state_dir();
                     let ws_hash = state::workspace_hash(Path::new(&r.cwd));
                     state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
-                    if let Some(ref p) = r.current_file {
-                        let p = p.clone();
+                    if let Some(p) = r.current_file.clone() {
                         select_file_impl(r, &p);
                     }
                     if !had_error {
@@ -2745,14 +3485,14 @@ fn nav_thread_directed(review: &mut Review, forward: bool) {
 }
 
 /// Closes the workbench, persists state, cancels backend, stops timers.
-pub fn close() {
+pub(crate) fn close() {
     poll::stop();
     backend::cancel_all();
     threads::window_close();
 
     let review = ACTIVE.with(|cell| cell.try_borrow_mut().ok().and_then(|mut opt| opt.take()));
 
-    let Some(review) = review else { return };
+    let Some(mut review) = review else { return };
 
     let state_dir = review.config.state_dir();
     let ws_hash = state::workspace_hash(Path::new(&review.cwd));
@@ -2767,16 +3507,23 @@ pub fn close() {
     state::save_review(&state_dir, &ws_hash, &ref_name, &review_state);
     state::save_threads(&state_dir, &ws_hash, &ref_name, &review.threads);
 
-    if let Some(ref sbs) = review.sbs {
+    if let Some(sbs) = review.sbs.as_ref() {
         let _ = diff::close_side_by_side(&sbs.old_buf, &sbs.old_win, &sbs.new_buf, &sbs.new_win);
     }
 
+    let wipe_fp = review.file_panel.should_wipe_buffer();
+    let file_nr = review.file_panel.buf_handle();
+    review.file_panel.cleanup();
+
     let diff_nr = review.diff_panel.buf.handle();
-    let file_nr = review.file_panel.buf.handle();
 
     let _ = api::set_current_tabpage(&review.tabpage);
     let _ = api::command("tabclose");
-    let _ = api::command(&format!("silent! bwipeout! {diff_nr} {file_nr}"));
+    if wipe_fp {
+        let _ = api::command(&format!("silent! bwipeout! {diff_nr} {file_nr}"));
+    } else {
+        let _ = api::command(&format!("silent! bwipeout! {diff_nr}"));
+    }
 }
 
 fn place_thread_signs(review: &Review) {
@@ -2808,7 +3555,7 @@ fn place_inline_thread_indicators(review: &mut Review) {
     let _ = review.diff_panel.buf.clear_namespace(ns, 0..usize::MAX);
     review.thread_inline_marks.clear();
 
-    let Some(ref current_file) = review.current_file else {
+    let Some(current_file) = review.current_file.clone() else {
         return;
     };
 
@@ -2883,8 +3630,8 @@ fn now_secs() -> i64 {
 /// On file mtime change: git::diff, re-render, detect_hunk_changes,
 /// ArbiterHunkNew extmarks, reset approved to Unreviewed, reanchor,
 /// bin unmatched, check_auto_resolve_timeouts, preserve cursor/scroll.
-pub fn refresh_file(review: &mut Review) {
-    let Some(ref path) = review.current_file else {
+pub(crate) fn refresh_file(review: &mut Review) {
+    let Some(path) = review.current_file.clone() else {
         return;
     };
 
@@ -2900,7 +3647,7 @@ pub fn refresh_file(review: &mut Review) {
     let is_untracked = review
         .files
         .iter()
-        .find(|(p, _, _)| p == path)
+        .find(|(p, _, _)| *p == path)
         .map(|(_, fs, _)| *fs == FileStatus::Untracked)
         .unwrap_or(false);
 
@@ -3077,7 +3824,7 @@ fn refresh_file_with_diff(
 ///
 /// On file list change: git::diff_names + untracked, rebuild files,
 /// reset approved when content changed, refresh file panel.
-pub fn refresh_file_list(review: &mut Review) {
+pub(crate) fn refresh_file_list(review: &mut Review) {
     let cwd = review.cwd.clone();
     let ref_name = review.ref_name.clone();
     let state_dir = review.config.state_dir();
@@ -3163,22 +3910,14 @@ pub fn refresh_file_list(review: &mut Review) {
     });
 }
 
-/// Sends all pending threads via `backend::send_comment` (one per thread).
-///
-/// Each gets its own session. On result: set session_id, add agent message,
-/// mark not pending, persist, re-render.
-/// Switches the diff panel to a different file.
-///
 pub(crate) fn rerender_file_panel(review: &mut Review) {
     let open_thread_counts = open_thread_count_map(&review.threads);
-    if let Ok(result) = file_panel::render(
-        &mut review.file_panel.buf,
-        &review.files,
-        &review.collapsed_dirs,
-        &open_thread_counts,
-    ) {
-        review.file_panel_line_to_path = result.line_to_path;
-        review.file_panel_line_to_dir = result.line_to_dir;
+    if let Err(e) = review.file_panel.render(&review.files, &open_thread_counts) {
+        let _ = api::notify(
+            &format!("[arbiter] file panel render failed: {e}"),
+            nvim_oxi::api::types::LogLevel::Warn,
+            &Dictionary::default(),
+        );
     }
 }
 
@@ -3212,7 +3951,7 @@ fn ensure_diff_panel(review: &mut Review) -> bool {
         return true;
     }
     let saved_win = api::get_current_win();
-    let _ = api::set_current_win(&review.file_panel.win);
+    let _ = api::set_current_win(review.file_panel.window());
     if api::command("rightbelow vsplit").is_err() {
         let _ = api::set_current_win(&saved_win);
         return false;
@@ -3224,13 +3963,11 @@ fn ensure_diff_panel(review: &mut Review) -> bool {
         return false;
     }
     review.diff_panel.win = new_win.clone();
-    let _ = api::set_current_win(&review.file_panel.win);
+    let _ = api::set_current_win(review.file_panel.window());
     let _ = api::command("vertical resize 40");
-    let _ = api::set_option_value(
-        "winbar",
-        " [arbiter] diff",
-        &OptionOpts::builder().win(new_win).build(),
-    );
+    if let Some(path) = review.current_file.as_deref() {
+        update_diff_winbar(review, path);
+    }
     let _ = api::set_current_win(&saved_win);
     true
 }
@@ -3313,6 +4050,8 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             scroll_to_thread_and_open(review, &tid);
         }
         apply_pending_hunk_nav(review);
+        apply_pending_scroll_top(review);
+        snap_cursor_to_hunk(review, &review.current_hunks.clone());
         return;
     }
 
@@ -3384,6 +4123,8 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
                     scroll_to_thread_and_open(r, &tid);
                 }
                 apply_pending_hunk_nav(r);
+                apply_pending_scroll_top(r);
+                snap_cursor_to_hunk(r, &hunks);
             });
         }
     });

@@ -12,7 +12,7 @@ use std::thread;
 
 /// Cursor CLI adapter. Binary name: `agent`.
 #[derive(Debug)]
-pub struct CursorAdapter {
+pub(crate) struct CursorAdapter {
     config: crate::backend::BackendConfig,
 }
 
@@ -53,11 +53,11 @@ impl CursorAdapter {
         if opts.stream {
             args.push("--stream-partial-output".to_string());
         }
-        if let Some(ref model) = self.config.model {
+        if let Some(model) = self.config.model.as_ref() {
             args.push("--model".to_string());
             args.push(model.clone());
         }
-        if let Some(ref dir) = self.config.workspace {
+        if let Some(dir) = self.config.workspace.as_ref() {
             args.push("--workspace".to_string());
             args.push(dir.clone());
         }
@@ -77,7 +77,7 @@ impl Adapter for CursorAdapter {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            if let Some(ref dir) = config.workspace {
+            if let Some(dir) = config.workspace.as_ref() {
                 cmd.current_dir(dir);
             }
 
@@ -137,14 +137,14 @@ impl Adapter for CursorAdapter {
                                     && combined.len() > streamed.len()
                                 {
                                     let delta = combined[streamed.len()..].to_string();
-                                    if let Some(ref cb) = on_stream {
+                                    if let Some(cb) = on_stream.as_ref() {
                                         let cb = Arc::clone(cb);
                                         crate::dispatch::schedule(move || cb(&delta));
                                     }
                                     streamed = combined.clone();
                                 } else if !combined.is_empty() && combined != streamed {
                                     let delta = combined.clone();
-                                    if let Some(ref cb) = on_stream {
+                                    if let Some(cb) = on_stream.as_ref() {
                                         let cb = Arc::clone(cb);
                                         crate::dispatch::schedule(move || cb(&delta));
                                     }
@@ -244,10 +244,10 @@ impl Adapter for CursorAdapter {
                     let child = &mut *handle.lock().expect("child lock");
                     let mut stdout_buf = String::new();
                     let mut stderr_buf = String::new();
-                    if let Some(ref mut pipe) = child.stdout {
+                    if let Some(pipe) = child.stdout.as_mut() {
                         let _ = pipe.read_to_string(&mut stdout_buf);
                     }
-                    if let Some(ref mut pipe) = child.stderr {
+                    if let Some(pipe) = child.stderr.as_mut() {
                         let _ = pipe.read_to_string(&mut stderr_buf);
                     }
                     let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
@@ -668,7 +668,7 @@ mod tests {
         eprintln!("\n--- final_text (last cumulative) ---");
         eprintln!("{final_text}");
 
-        if let Some(ref rt) = result_text {
+        if let Some(rt) = result_text.as_ref() {
             eprintln!("\n--- result event text ---");
             eprintln!("{rt}");
         }

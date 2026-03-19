@@ -12,6 +12,16 @@ use std::sync::{Arc, Mutex};
 
 static ADAPTER: Mutex<Option<Arc<dyn Adapter + Send + Sync>>> = Mutex::new(None);
 
+type OnStarted = Box<dyn Fn(&str) + Send + Sync>;
+static ON_ITEM_STARTED: Mutex<Option<OnStarted>> = Mutex::new(None);
+
+/// Registers a callback invoked on the main thread when a tagged item
+/// starts processing (transitions from queued to in-flight). The callback
+/// receives the item's tag.
+pub(super) fn set_on_item_started(cb: OnStarted) {
+    *ON_ITEM_STARTED.lock().expect("on_started lock") = Some(cb);
+}
+
 /// Stores the adapter. Overwrites any previous adapter (allows test injection).
 pub(super) fn set_adapter(adapter: Arc<dyn Adapter + Send + Sync>) {
     // SAFETY: Mutex poisoning indicates a prior panic, not a recoverable condition.
@@ -84,6 +94,11 @@ fn process_next() {
     match item {
         Some(item) => {
             crate::activity::set_busy(true);
+            if let Some(tag) = item.tag.as_ref() {
+                if let Some(cb) = ON_ITEM_STARTED.lock().expect("on_started lock").as_ref() {
+                    cb(tag);
+                }
+            }
             let gen = GENERATION.load(Ordering::SeqCst);
             let Some(adapter) = get_adapter() else {
                 crate::dispatch::schedule(|| {

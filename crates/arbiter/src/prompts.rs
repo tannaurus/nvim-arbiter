@@ -5,7 +5,7 @@
 
 /// Review-level context injected into every thread prompt.
 #[derive(Debug)]
-pub struct ReviewContext<'a> {
+pub(crate) struct ReviewContext<'a> {
     /// Branch being compared against (e.g. "main"). Empty = working tree.
     pub ref_name: &'a str,
     /// Full unified diff for the current file. Gives the agent visibility
@@ -18,7 +18,7 @@ pub struct ReviewContext<'a> {
 /// Formats a comment prompt with file, line, and surrounding code context.
 ///
 /// Used when sending new comments to the agent.
-pub fn format_comment_prompt(
+pub(crate) fn format_comment_prompt(
     file: &str,
     line: u32,
     comment: &str,
@@ -36,7 +36,7 @@ pub fn format_comment_prompt(
 /// When resuming an existing session the agent already has prior conversation
 /// history, but including the location keeps the reply grounded. When starting
 /// a new session (no prior session_id) this context is essential.
-pub fn format_reply_prompt(
+pub(crate) fn format_reply_prompt(
     file: &str,
     line: u32,
     reply: &str,
@@ -61,22 +61,59 @@ pub fn format_reply_prompt(
 }
 
 /// Formats the extraction prompt that asks the agent to distill generalizable
-/// coding conventions from a resolved thread conversation.
+/// coding conventions from a thread conversation.
 ///
-/// Returns `None` if the thread has fewer than 2 messages (nothing to extract from).
-pub fn format_extraction_prompt(messages: &[(String, String)]) -> Option<String> {
-    if messages.len() < 2 {
+/// Returns `None` if the thread has fewer than 3 messages. This ensures the
+/// user has responded at least once after the agent's initial reply, so
+/// extraction only runs after the user has had a chance to confirm or reject
+/// the agent's direction.
+pub(crate) fn format_extraction_prompt(
+    messages: &[(String, String)],
+    existing_rules: &[String],
+) -> Option<String> {
+    if messages.len() < 3 {
         return None;
     }
     let mut prompt = String::from(
-        "Below is a completed code review thread between a reviewer and an AI agent. \
-         Extract any general coding conventions, style rules, or patterns that the reviewer \
-         established. Only include rules that would apply broadly across the codebase, not \
-         feedback specific to this particular code.\n\n\
-         If no generalizable rules were established, respond with exactly: NONE\n\n\
-         Otherwise, output each rule on its own line, prefixed with \"RULE|\". Example:\n\
+        "Below is a code review thread between a reviewer and an AI agent.\n\n\
+         Your task: determine whether the reviewer has EXPLICITLY confirmed or approved \
+         a coding convention, style rule, or pattern that should apply broadly across \
+         the codebase.\n\n\
+         Rules for extraction:\n\
+         - Only extract a rule if the reviewer has clearly signed off on it. Look for \
+         explicit approval: \"yes\", \"that's right\", \"good\", \"do that everywhere\", \
+         \"always use X\", agreement with the agent's approach, etc.\n\
+         - Do NOT extract rules from the reviewer's initial comment alone. They may be \
+         exploring, asking a question, or proposing something they haven't committed to.\n\
+         - Do NOT extract rules from the agent's suggestions unless the reviewer explicitly \
+         agreed with them.\n\
+         - Do NOT extract rules about one-off fixes, specific variable names, or decisions \
+         that only apply to the code under review.\n\
+         - Do NOT repeat or re-add any existing rule. If a convention is already covered by \
+         an existing rule, do not emit it again.\n\
+         - If this thread's discussion refines or clarifies an existing rule, you may \
+         rephrase it using the REPHRASE format shown below. Only rephrase when the \
+         reviewer's feedback genuinely changes the meaning or scope of the rule.\n\
+         - Be very conservative. When in doubt, respond with NONE. Most threads should \
+         produce no rules.\n\n",
+    );
+
+    if !existing_rules.is_empty() {
+        prompt.push_str("Existing rules (do NOT repeat these):\n");
+        for rule in existing_rules {
+            prompt.push_str(&format!("- {rule}\n"));
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str(
+        "If no confirmed, broadly-applicable rules were established, respond with exactly: NONE\n\n\
+         Otherwise, output each action on its own line:\n\
+         - New rule: RULE|<rule text>\n\
+         - Rephrase existing rule: REPHRASE|<exact existing rule text>|<new wording>\n\n\
+         Examples:\n\
          RULE|Prefer map_err over match for error transformation\n\
-         RULE|Use constants instead of repeated string literals\n\n\
+         REPHRASE|Use constants instead of string literals|Use constants or enums instead of repeated string literals\n\n\
          Thread:\n",
     );
     for (role, text) in messages {
@@ -85,17 +122,47 @@ pub fn format_extraction_prompt(messages: &[(String, String)]) -> Option<String>
     Some(prompt)
 }
 
-/// Parses the extraction response for `RULE|` prefixed lines.
+/// An action parsed from the extraction response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExtractionAction {
+    /// A newly established rule.
+    Add(String),
+    /// Replace an existing rule's text with a refined version.
+    Rephrase { old: String, new: String },
+}
+
+/// Parses the extraction response for `RULE|` and `REPHRASE|` lines.
 ///
-/// Returns an empty vec if the response contains "NONE" or no valid rules.
-pub fn parse_extraction_response(response: &str) -> Vec<String> {
+/// Returns an empty vec if the response contains "NONE" or no valid actions.
+pub(crate) fn parse_extraction_response(response: &str) -> Vec<ExtractionAction> {
     if response.trim() == "NONE" {
         return Vec::new();
     }
     response
         .lines()
-        .filter_map(|line| line.strip_prefix("RULE|").map(|r| r.trim().to_string()))
-        .filter(|r| !r.is_empty())
+        .filter_map(|line| {
+            if let Some(rule) = line.strip_prefix("RULE|") {
+                let rule = rule.trim();
+                if rule.is_empty() {
+                    return None;
+                }
+                return Some(ExtractionAction::Add(rule.to_string()));
+            }
+            if let Some(rest) = line.strip_prefix("REPHRASE|") {
+                let parts: Vec<&str> = rest.splitn(2, '|').collect();
+                if parts.len() == 2 {
+                    let old = parts[0].trim();
+                    let new = parts[1].trim();
+                    if !old.is_empty() && !new.is_empty() {
+                        return Some(ExtractionAction::Rephrase {
+                            old: old.to_string(),
+                            new: new.to_string(),
+                        });
+                    }
+                }
+            }
+            None
+        })
         .collect()
 }
 
@@ -148,7 +215,16 @@ mod tests {
     #[test]
     fn extraction_prompt_none_for_single_message() {
         let msgs = vec![("user".to_string(), "fix this".to_string())];
-        assert!(format_extraction_prompt(&msgs).is_none());
+        assert!(format_extraction_prompt(&msgs, &[]).is_none());
+    }
+
+    #[test]
+    fn extraction_prompt_none_for_two_messages() {
+        let msgs = vec![
+            ("user".to_string(), "use map_err here".to_string()),
+            ("agent".to_string(), "done".to_string()),
+        ];
+        assert!(format_extraction_prompt(&msgs, &[]).is_none());
     }
 
     #[test]
@@ -156,11 +232,37 @@ mod tests {
         let msgs = vec![
             ("user".to_string(), "use map_err here".to_string()),
             ("agent".to_string(), "done".to_string()),
+            ("user".to_string(), "yes, always do that".to_string()),
         ];
-        let prompt = format_extraction_prompt(&msgs).unwrap();
+        let prompt = format_extraction_prompt(&msgs, &[]).unwrap();
         assert!(prompt.contains("[user]: use map_err here"));
         assert!(prompt.contains("[agent]: done"));
+        assert!(prompt.contains("[user]: yes, always do that"));
         assert!(prompt.contains("RULE|"));
+    }
+
+    #[test]
+    fn extraction_prompt_includes_existing_rules() {
+        let msgs = vec![
+            ("user".to_string(), "use map_err here".to_string()),
+            ("agent".to_string(), "done".to_string()),
+            ("user".to_string(), "yes".to_string()),
+        ];
+        let existing = vec!["Prefer constants".to_string()];
+        let prompt = format_extraction_prompt(&msgs, &existing).unwrap();
+        assert!(prompt.contains("Existing rules"));
+        assert!(prompt.contains("- Prefer constants"));
+    }
+
+    #[test]
+    fn extraction_prompt_omits_existing_rules_section_when_empty() {
+        let msgs = vec![
+            ("user".to_string(), "a".to_string()),
+            ("agent".to_string(), "b".to_string()),
+            ("user".to_string(), "c".to_string()),
+        ];
+        let prompt = format_extraction_prompt(&msgs, &[]).unwrap();
+        assert!(!prompt.contains("Existing rules"));
     }
 
     #[test]
@@ -172,15 +274,61 @@ mod tests {
     #[test]
     fn parse_extraction_valid_rules() {
         let response = "RULE|Use map_err over match\nRULE|Prefer constants\nsome other text\n";
-        let rules = parse_extraction_response(response);
-        assert_eq!(rules, vec!["Use map_err over match", "Prefer constants"]);
+        let actions = parse_extraction_response(response);
+        assert_eq!(
+            actions,
+            vec![
+                ExtractionAction::Add("Use map_err over match".to_string()),
+                ExtractionAction::Add("Prefer constants".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn parse_extraction_empty_rule_skipped() {
         let response = "RULE|\nRULE|  \nRULE|Real rule\n";
-        let rules = parse_extraction_response(response);
-        assert_eq!(rules, vec!["Real rule"]);
+        let actions = parse_extraction_response(response);
+        assert_eq!(
+            actions,
+            vec![ExtractionAction::Add("Real rule".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_extraction_rephrase() {
+        let response = "REPHRASE|Use constants|Use constants or enums instead of string literals\n";
+        let actions = parse_extraction_response(response);
+        assert_eq!(
+            actions,
+            vec![ExtractionAction::Rephrase {
+                old: "Use constants".to_string(),
+                new: "Use constants or enums instead of string literals".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_extraction_mixed_actions() {
+        let response = "RULE|New rule\nREPHRASE|Old text|Better text\nRULE|Another rule\ngarbage\n";
+        let actions = parse_extraction_response(response);
+        assert_eq!(
+            actions,
+            vec![
+                ExtractionAction::Add("New rule".to_string()),
+                ExtractionAction::Rephrase {
+                    old: "Old text".to_string(),
+                    new: "Better text".to_string(),
+                },
+                ExtractionAction::Add("Another rule".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_extraction_rephrase_missing_parts() {
+        let response = "REPHRASE|only one part\nREPHRASE||\nREPHRASE|old|\n";
+        let actions = parse_extraction_response(response);
+        assert!(actions.is_empty());
     }
 
     fn empty_ctx() -> ReviewContext<'static> {
