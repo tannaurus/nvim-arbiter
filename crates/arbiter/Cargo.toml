@@ -1,6 +1,6 @@
 [package]
 name = "arbiter"
-version = "0.1.0"
+version = "0.0.6"
 edition = "2021"
 description = "Neovim plugin for structured diff review and thread-based collaboration"
 
