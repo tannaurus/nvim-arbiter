@@ -43,6 +43,8 @@ jobs:
         with:
           cache: true
       - run: cargo test -p arbiter
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,--allow-undefined"
 
   integration:
     name: Integration tests
