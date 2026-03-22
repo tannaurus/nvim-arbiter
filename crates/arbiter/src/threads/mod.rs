@@ -6,12 +6,13 @@
 mod input;
 pub(crate) mod window;
 
-pub use input::{close as input_close, open, open_for_line, OnCancel, OnSubmit};
+pub use input::{close as input_close, open, open_below, open_for_line, OnCancel, OnSubmit};
 pub use window::{
     append_interrupted, append_learned_rules, append_message, append_revision_summary,
-    append_status, append_streaming, close as window_close, current_thread_id as window_thread_id,
-    is_open as window_is_open, open as window_open, replace_last_agent_message, revision_at_cursor,
-    OnClose, OnReplyRequested, OnRevisionSelected,
+    append_similar_threads, append_status, append_streaming, close as window_close,
+    current_thread_id as window_thread_id, handle as window_handle, is_open as window_is_open,
+    open as window_open, replace_last_agent_message, OnClose, OnReplyRequested, OnRevisionSelected,
+    OnSimilarSelected,
 };
 
 use crate::types::{Role, ThreadOrigin, ThreadStatus};
@@ -62,6 +63,23 @@ pub struct RevisionFile {
     pub after: Option<String>,
 }
 
+/// Reference to another thread with a similar issue.
+///
+/// Cross-links threads that the agent identified as addressing
+/// the same class of problem during self-review. Navigating to
+/// a similar ref jumps the diff panel to that thread's file/line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimilarRef {
+    /// Thread ID of the similar thread.
+    pub thread_id: String,
+    /// File path of the similar thread.
+    pub file: String,
+    /// Line number of the similar thread.
+    pub line: u32,
+    /// Preview text (truncated first message).
+    pub preview: String,
+}
+
 /// A snapshot of changes produced by a single agent response.
 ///
 /// Each non-trivial agent response (one that modifies files) creates a
@@ -85,8 +103,6 @@ pub struct Revision {
 pub struct CreateOpts {
     /// If true, comment is stored locally and not yet sent.
     pub pending: bool,
-    /// If true, comment is sent immediately.
-    pub immediate: bool,
     /// If true, thread auto-resolves when file change is detected.
     pub auto_resolve: bool,
     /// Origin of the thread (user or agent).
@@ -129,6 +145,10 @@ pub struct Thread {
     /// Revisions captured per agent response that modifies files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revisions: Vec<Revision>,
+    /// Cross-references to threads with similar issues, identified
+    /// during self-review similarity analysis.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub similar_threads: Vec<SimilarRef>,
 }
 
 /// Options for filtering threads.
@@ -167,6 +187,7 @@ pub fn create(file: &str, line: u32, text: &str, opts: CreateOpts) -> Thread {
         messages: vec![msg],
         pending: opts.pending,
         revisions: Vec::new(),
+        similar_threads: Vec::new(),
     }
 }
 
@@ -204,10 +225,11 @@ pub fn resolve_all(threads: &mut [Thread]) {
 }
 
 /// Removes a thread from the list by index.
-///
-/// Panics if index is out of bounds.
+/// No-op if the index is out of bounds.
 pub fn dismiss(threads: &mut Vec<Thread>, index: usize) {
-    threads.remove(index);
+    if index < threads.len() {
+        threads.remove(index);
+    }
 }
 
 /// Content-match re-anchoring.
@@ -252,16 +274,6 @@ pub fn for_file<'a>(threads: &'a [Thread], file: &str) -> Vec<&'a Thread> {
     let mut out: Vec<&Thread> = threads.iter().filter(|t| t.file == file).collect();
     out.sort_by_key(|t| t.line);
     out
-}
-
-/// Returns indices of pending (batch, not yet sent) threads.
-pub fn pending_indices(threads: &[Thread]) -> Vec<usize> {
-    threads
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.pending)
-        .map(|(i, _)| i)
-        .collect()
 }
 
 /// Filters threads by optional origin and/or status.
@@ -433,6 +445,13 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_out_of_bounds_is_noop() {
+        let mut threads = vec![create("a.rs", 1, "a", CreateOpts::default())];
+        dismiss(&mut threads, 5);
+        assert_eq!(threads.len(), 1);
+    }
+
+    #[test]
     fn resolve_all_resolves_open_only() {
         let t1 = create("a.rs", 1, "a", CreateOpts::default());
         let mut t2 = create("b.rs", 2, "b", CreateOpts::default());
@@ -478,12 +497,23 @@ mod tests {
     }
 
     #[test]
+    fn reanchor_by_content_duplicate_lines() {
+        let mut t = create("f.rs", 1, "hi", CreateOpts::default());
+        t.anchor_content = "dup line".to_string();
+        let mut threads = vec![t];
+        let contents = "dup line\nother\ndup line\n";
+        let unmatched = reanchor_by_content(&mut threads, "f.rs", contents);
+        assert!(unmatched.is_empty());
+        assert_eq!(threads[0].line, 1);
+    }
+
+    #[test]
     fn reanchor_context_missing() {
         let mut t = create("f.rs", 1, "hi", CreateOpts::default());
         t.anchor_content = "let x = 1;".to_string();
         t.anchor_context = vec!["must be nearby".to_string()];
         let mut threads = vec![t];
-        let contents = "let x = 1;\nother line\n"; // anchor found but context >5 lines away
+        let contents = "let x = 1;\nother line\n";
         let unmatched = reanchor_by_content(&mut threads, "f.rs", contents);
         assert_eq!(unmatched.len(), 1);
     }
@@ -536,7 +566,16 @@ mod tests {
         let t3 = create("a.rs", 3, "c", CreateOpts::default());
         let threads = vec![t1, t2, t3];
         let order = sorted_global(&threads, &["a.rs".into(), "b.rs".into()]);
-        assert_eq!(order, vec![2, 1, 0]); // a.rs:3, a.rs:10, b.rs:5
+        assert_eq!(order, vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn sorted_global_missing_file() {
+        let t1 = create("a.rs", 1, "a", CreateOpts::default());
+        let t2 = create("unknown.rs", 5, "b", CreateOpts::default());
+        let threads = vec![t1, t2];
+        let order = sorted_global(&threads, &["a.rs".to_string()]);
+        assert_eq!(order, vec![0, 1]);
     }
 
     #[test]
@@ -551,6 +590,18 @@ mod tests {
     }
 
     #[test]
+    fn next_thread_current_not_in_sorted() {
+        let sorted = vec![0, 1, 2];
+        assert_eq!(next_thread(&sorted, Some(999)), Some(0));
+    }
+
+    #[test]
+    fn prev_thread_current_not_in_sorted() {
+        let sorted = vec![0, 1, 2];
+        assert_eq!(prev_thread(&sorted, Some(999)), Some(2));
+    }
+
+    #[test]
     fn to_summaries_truncates_preview() {
         let mut t = create("f.rs", 1, "x", CreateOpts::default());
         t.messages[0].text = "a".repeat(50);
@@ -558,6 +609,15 @@ mod tests {
         let summaries = to_summaries(&threads);
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].preview.len(), 40);
+    }
+
+    #[test]
+    fn to_summaries_empty_messages() {
+        let mut t = create("f.rs", 1, "x", CreateOpts::default());
+        t.messages.clear();
+        let summaries = to_summaries(&[t]);
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].preview.is_empty());
     }
 
     #[test]
@@ -584,11 +644,45 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_indices() {
-        let mut t1 = create("a.rs", 1, "a", CreateOpts::default());
-        t1.pending = true;
-        let t2 = create("b.rs", 2, "b", CreateOpts::default());
-        let threads = vec![t1, t2];
-        assert_eq!(pending_indices(&threads), vec![0]);
+    fn check_auto_resolve_no_timestamp() {
+        let mut t = create("f.rs", 1, "hi", CreateOpts::default());
+        t.auto_resolve = true;
+        t.auto_resolve_at = None;
+        let mut threads = vec![t];
+        let timed = check_auto_resolve_timeouts(&mut threads, 60, 100);
+        assert_eq!(timed.len(), 1);
+        assert!(!threads[0].auto_resolve);
+    }
+
+    #[test]
+    fn create_has_empty_similar_threads() {
+        let t = create("f.rs", 1, "hi", CreateOpts::default());
+        assert!(t.similar_threads.is_empty());
+    }
+
+    #[test]
+    fn similar_threads_serialized_and_deserialized() {
+        let mut t = create("f.rs", 1, "hi", CreateOpts::default());
+        t.similar_threads.push(SimilarRef {
+            thread_id: "abc-123".to_string(),
+            file: "other.rs".to_string(),
+            line: 10,
+            preview: "same issue".to_string(),
+        });
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("similar_threads"));
+        let deser: Thread = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.similar_threads.len(), 1);
+        assert_eq!(deser.similar_threads[0].thread_id, "abc-123");
+        assert_eq!(deser.similar_threads[0].file, "other.rs");
+        assert_eq!(deser.similar_threads[0].line, 10);
+        assert_eq!(deser.similar_threads[0].preview, "same issue");
+    }
+
+    #[test]
+    fn similar_threads_skipped_when_empty() {
+        let t = create("f.rs", 1, "hi", CreateOpts::default());
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(!json.contains("similar_threads"));
     }
 }

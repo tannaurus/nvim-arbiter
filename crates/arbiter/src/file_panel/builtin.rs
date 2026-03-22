@@ -501,4 +501,85 @@ mod tests {
         let dir_count = result.lines.iter().filter(|l| l.contains("▾ src/")).count();
         assert_eq!(dir_count, 1);
     }
+
+    #[test]
+    fn build_tree_root_only_files() {
+        let files = vec![
+            file("Cargo.toml", FileStatus::Modified, ReviewStatus::Unreviewed),
+            file("README.md", FileStatus::Modified, ReviewStatus::Approved),
+            file("main.rs", FileStatus::Added, ReviewStatus::Unreviewed),
+        ];
+        let result = build_tree(&files, &no_collapse(), &no_threads());
+        assert!(result.line_to_dir.is_empty());
+        assert_eq!(result.line_to_path.len(), 3);
+        assert!(!result
+            .lines
+            .iter()
+            .any(|l| l.contains("▾") || l.contains("▸")));
+    }
+
+    #[test]
+    fn build_tree_duplicate_paths() {
+        let files = vec![
+            file("src/lib.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
+            file("src/lib.rs", FileStatus::Modified, ReviewStatus::Approved),
+        ];
+        let result = build_tree(&files, &no_collapse(), &no_threads());
+        assert!(result.line_to_path.values().any(|p| p == "src/lib.rs"));
+        let summary = result.lines.last().unwrap();
+        assert!(summary.contains("2 files"));
+    }
+
+    #[test]
+    fn build_tree_empty_path_string() {
+        let files = vec![file("", FileStatus::Modified, ReviewStatus::Unreviewed)];
+        let result = build_tree(&files, &no_collapse(), &no_threads());
+        assert!(result.line_to_path.values().any(|p| p.is_empty()));
+    }
+
+    #[test]
+    fn snapshot_build_tree_representative() {
+        let files = vec![
+            file("Cargo.toml", FileStatus::Modified, ReviewStatus::Approved),
+            file("README.md", FileStatus::Modified, ReviewStatus::Unreviewed),
+            file("src/lib.rs", FileStatus::Modified, ReviewStatus::Approved),
+            file(
+                "src/config.rs",
+                FileStatus::Modified,
+                ReviewStatus::NeedsChanges,
+            ),
+            file(
+                "src/api/handler.rs",
+                FileStatus::Modified,
+                ReviewStatus::Unreviewed,
+            ),
+            file(
+                "src/api/routes.rs",
+                FileStatus::Added,
+                ReviewStatus::Unreviewed,
+            ),
+            file(
+                "src/db/connection.rs",
+                FileStatus::Modified,
+                ReviewStatus::Approved,
+            ),
+            file(
+                "tests/integration.rs",
+                FileStatus::Added,
+                ReviewStatus::Unreviewed,
+            ),
+            file(
+                "scripts/deploy.sh",
+                FileStatus::Untracked,
+                ReviewStatus::Unreviewed,
+            ),
+        ];
+        let mut thread_counts = HashMap::new();
+        thread_counts.insert("src/config.rs".to_string(), 2);
+        thread_counts.insert("src/api/handler.rs".to_string(), 1);
+        let output = build_tree(&files, &no_collapse(), &thread_counts)
+            .lines
+            .join("\n");
+        insta::assert_snapshot!("build_tree_representative", output);
+    }
 }

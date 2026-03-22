@@ -14,16 +14,16 @@ use std::process::Command;
 #[derive(Debug, Clone)]
 pub(crate) struct GitResult {
     /// Standard output.
-    pub stdout: String,
+    pub(crate) stdout: String,
     /// Standard error.
-    pub stderr: String,
+    pub(crate) stderr: String,
     /// Exit code; -1 if git was not found or failed to spawn.
-    pub exit_code: i32,
+    pub(crate) exit_code: i32,
 }
 
 impl GitResult {
     /// Returns true if the command succeeded (exit code 0).
-    pub fn success(&self) -> bool {
+    pub(crate) fn success(&self) -> bool {
         self.exit_code == 0
     }
 }
@@ -38,7 +38,7 @@ where
     F: FnOnce(GitResult) + Send + 'static,
 {
     let cwd = cwd.to_string();
-    let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
 
     std::thread::spawn(move || {
         let result = run_git_sync(&cwd, &args);
@@ -58,8 +58,8 @@ fn run_git_sync(cwd: &str, args: &[String]) -> GitResult {
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let exit_code = output.status.code().unwrap_or(-1);
 
     GitResult {
@@ -178,6 +178,26 @@ where
     });
 }
 
+/// Reads a file at a given ref synchronously via `git show <ref>:<path>`.
+///
+/// Uses `resolve_merge_base` so the ref is consistent with diff commands.
+/// Returns `None` if the file doesn't exist at that ref.
+pub(crate) fn show_sync(cwd: &str, ref_name: &str, path: &str) -> Option<String> {
+    let base = resolve_merge_base(cwd, ref_name);
+    let effective_ref = if base.is_empty() {
+        ref_name.to_string()
+    } else {
+        base
+    };
+    let obj = format!("{effective_ref}:{path}");
+    let result = run_git_sync(cwd, &["show".to_string(), obj]);
+    if result.success() {
+        Some(result.stdout)
+    } else {
+        None
+    }
+}
+
 /// Runs `git diff <merge-base>` (full repo) and invokes the callback with the unified diff output.
 ///
 /// Uses the merge-base so only branch changes appear.
@@ -259,8 +279,8 @@ fn run_git_with_stdin(cwd: &str, args: &[&str], stdin_data: &str) -> GitResult {
 
     match child.wait_with_output() {
         Ok(output) => GitResult {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             exit_code: output.status.code().unwrap_or(-1),
         },
         Err(e) => GitResult {
@@ -293,18 +313,14 @@ mod tests {
 
     #[test]
     fn run_git_sync_status_in_repo() {
-        let dir = std::env::temp_dir().join("arbiter_git_sync_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = Command::new("git")
-            .args(["init"])
-            .current_dir(&dir)
-            .output();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let _ = Command::new("git").args(["init"]).current_dir(dir).output();
         let result = run_git_sync(
             dir.to_str().unwrap(),
             &["status".to_string(), "--porcelain".to_string()],
         );
         assert!(result.success());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -315,19 +331,15 @@ mod tests {
 
     #[test]
     fn run_git_sync_diff_names_empty_repo() {
-        let dir = std::env::temp_dir().join("arbiter_git_diff_names_test");
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = Command::new("git")
-            .args(["init"])
-            .current_dir(&dir)
-            .output();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let _ = Command::new("git").args(["init"]).current_dir(dir).output();
         let result = run_git_sync(
             dir.to_str().unwrap(),
             &["diff".to_string(), "--name-status".to_string()],
         );
         assert!(result.success());
         assert!(result.stdout.trim().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn init_repo(dir: &std::path::Path) {
@@ -367,7 +379,7 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git diff --cached");
-        String::from_utf8_lossy(&out.stdout).to_string()
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     fn working_diff(dir: &std::path::Path, file: &str) -> String {
@@ -376,7 +388,7 @@ mod tests {
             .current_dir(dir)
             .output()
             .expect("git diff");
-        String::from_utf8_lossy(&out.stdout).to_string()
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     #[test]
@@ -501,6 +513,41 @@ mod tests {
     }
 
     #[test]
+    fn show_sync_returns_file_at_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("hello.txt"), "initial content\n").expect("write");
+        commit_all(dir, "initial");
+
+        std::fs::write(dir.join("hello.txt"), "modified content\n").expect("write");
+        commit_all(dir, "modified");
+
+        let result = show_sync(dir.to_str().unwrap(), "HEAD~1", "hello.txt");
+        assert_eq!(result.as_deref(), Some("initial content\n"));
+    }
+
+    #[test]
+    fn show_sync_missing_file_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "x\n").expect("write");
+        commit_all(dir, "initial");
+
+        let result = show_sync(dir.to_str().unwrap(), "HEAD", "nonexistent.txt");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn show_sync_invalid_dir_returns_none() {
+        let result = show_sync("/nonexistent/dir/12345", "HEAD", "file.txt");
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn run_git_with_stdin_spawn_failure() {
         let result = run_git_with_stdin("/nonexistent/dir/12345", &["apply", "--cached"], "x");
         assert!(!result.success());
@@ -516,8 +563,8 @@ mod tests {
         assert!(ok.success());
 
         let fail = GitResult {
-            stdout: String::new(),
-            stderr: "error".to_string(),
+            stdout: "some output".to_string(),
+            stderr: String::new(),
             exit_code: 1,
         };
         assert!(!fail.success());
@@ -528,5 +575,40 @@ mod tests {
             exit_code: -1,
         };
         assert!(!not_found.success());
+
+        let fatal = GitResult {
+            stdout: String::new(),
+            stderr: "fatal: error".to_string(),
+            exit_code: 128,
+        };
+        assert!(!fatal.success());
+    }
+
+    #[test]
+    fn run_git_sync_invalid_command() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        let _ = Command::new("git").args(["init"]).current_dir(dir).output();
+        let result = run_git_sync(
+            dir.to_str().unwrap(),
+            &["not-a-real-subcommand".to_string()],
+        );
+        assert!(!result.success());
+        assert!(result.exit_code != 0);
+    }
+
+    #[test]
+    fn resolve_merge_base_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+        std::fs::write(dir.join("a.txt"), "content\n").expect("write");
+        commit_all(dir, "initial");
+
+        let base = resolve_merge_base(dir.to_str().unwrap(), "nonexistent-ref-abc123");
+        assert_eq!(base, "nonexistent-ref-abc123");
+
+        let base_empty = resolve_merge_base(dir.to_str().unwrap(), "");
+        assert_eq!(base_empty, "HEAD");
     }
 }

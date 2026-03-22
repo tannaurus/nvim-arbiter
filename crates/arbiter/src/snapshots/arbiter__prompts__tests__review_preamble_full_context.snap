@@ -1,0 +1,24 @@
+---
+source: crates/arbiter/src/prompts.rs
+assertion_line: 835
+expression: output
+---
+This is a code review of changes on the working branch compared against `main`.
+
+Project rules:
+- [Style] Use constants instead of string literals
+- [Error] Return Result, never panic
+
+Reviewer preferences (established during this review):
+- Prefer map_err over match
+- Always use ? for propagation
+
+Diff for src/engine.rs (lines prefixed with `-` were removed, `+` were added):
+```diff
+@@ -10,4 +10,6 @@
+ fn process() {
+-    old_call();
++    new_call();
++    extra_step();
+ }
+```

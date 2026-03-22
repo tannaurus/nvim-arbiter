@@ -1,0 +1,13 @@
+diff --git a/src/utils.rs b/src/utils.rs
+new file mode 100644
+--- /dev/null
++++ b/src/utils.rs
+@@ -0,0 +1,8 @@
++pub fn add(a: i32, b: i32) -> i32 {
++    a + b
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++}

@@ -6,8 +6,9 @@
 
 use super::Message;
 use crate::config;
+use crate::panel::{self, SEPARATOR, STATUS_PREFIX};
 use crate::types::Role;
-use chrono::Local;
+
 use nvim_oxi::api::opts::{CreateAutocmdOpts, OptionOpts, SetKeymapOpts};
 use nvim_oxi::api::types::Mode;
 use nvim_oxi::api::{self, Buffer, Window};
@@ -15,8 +16,6 @@ use nvim_oxi::IntoResult;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-const SEPARATOR: &str = "  ────────────────────────────────";
-const STATUS_PREFIX: &str = "  ⏳ ";
 const INTERRUPTED_PREFIX: &str = "  ⚠ interrupted  ";
 const REVISION_PREFIX: &str = "  ◆ ";
 
@@ -26,6 +25,8 @@ thread_local! {
     static THREAD_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static ON_CLOSE: RefCell<Option<OnClose>> = const { RefCell::new(None) };
     static ON_REVISION: RefCell<Option<OnRevisionSelected>> = const { RefCell::new(None) };
+    static ON_SIMILAR: RefCell<Option<OnSimilarSelected>> = const { RefCell::new(None) };
+    static SIMILAR_MAP: RefCell<Vec<(usize, String)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Callback invoked when the user requests to reply (presses `<CR>`).
@@ -38,20 +39,9 @@ pub type OnClose = Arc<dyn Fn() + Send + Sync>;
 /// Receives the 1-based revision index.
 pub type OnRevisionSelected = Arc<dyn Fn(u32) + Send + Sync>;
 
-fn format_ts(ts: i64) -> String {
-    if ts == 0 {
-        return String::new();
-    }
-    let fmt = &config::get().thread_window.date_format;
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).format(fmt).to_string())
-        .unwrap_or_default()
-}
-
-fn format_now() -> String {
-    let fmt = &config::get().thread_window.date_format;
-    Local::now().format(fmt).to_string()
-}
+/// Callback invoked when the user presses `<CR>` on a similar-thread line.
+/// Receives the thread ID of the similar thread.
+pub type OnSimilarSelected = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Opens a split panel for the given thread.
 ///
@@ -66,6 +56,7 @@ pub fn open(
     on_reply: OnReplyRequested,
     on_close: Option<OnClose>,
     on_revision: Option<OnRevisionSelected>,
+    on_similar: Option<OnSimilarSelected>,
 ) -> nvim_oxi::Result<()> {
     let ea_was_on =
         api::get_option_value::<bool>("equalalways", &OptionOpts::default()).unwrap_or(true);
@@ -102,7 +93,7 @@ pub fn open(
             Role::User => ("you", "ArbiterThreadUser"),
             Role::Agent => ("agent", "ArbiterThreadAgent"),
         };
-        let ts_str = format_ts(m.ts);
+        let ts_str = panel::format_ts(m.ts);
         let author_line = if ts_str.is_empty() {
             format!("┊ {author}")
         } else {
@@ -151,11 +142,15 @@ pub fn open(
     let opts = SetKeymapOpts::builder()
         .callback(move |_| {
             if let Some(rev_idx) = revision_at_cursor() {
-                ON_REVISION.with(|c| {
-                    if let Some(cb) = c.borrow().as_ref() {
-                        cb(rev_idx);
-                    }
-                });
+                let cb = ON_REVISION.with(|c| c.borrow().clone());
+                if let Some(cb) = cb {
+                    cb(rev_idx);
+                }
+            } else if let Some(tid) = similar_at_cursor() {
+                let cb = ON_SIMILAR.with(|c| c.borrow().clone());
+                if let Some(cb) = cb {
+                    cb(tid);
+                }
             } else {
                 on_reply_cell();
             }
@@ -180,6 +175,8 @@ pub fn open(
     THREAD_ID.with(|c| *c.borrow_mut() = Some(thread_id.to_string()));
     ON_CLOSE.with(|c| *c.borrow_mut() = on_close);
     ON_REVISION.with(|c| *c.borrow_mut() = on_revision);
+    ON_SIMILAR.with(|c| *c.borrow_mut() = on_similar);
+    SIMILAR_MAP.with(|c| c.borrow_mut().clear());
 
     let _ = api::create_autocmd(
         ["BufWipeout"],
@@ -192,6 +189,8 @@ pub fn open(
                     let cb = ON_CLOSE.with(|c| c.borrow_mut().take());
                     THREAD_ID.with(|c| c.borrow_mut().take());
                     ON_REVISION.with(|c| c.borrow_mut().take());
+                    ON_SIMILAR.with(|c| c.borrow_mut().take());
+                    SIMILAR_MAP.with(|c| c.borrow_mut().clear());
                     if let Some(cb) = cb {
                         cb();
                     }
@@ -221,7 +220,7 @@ pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
             Role::User => ("you", "ArbiterThreadUser"),
             Role::Agent => ("agent", "ArbiterThreadAgent"),
         };
-        let author_line = format!("┊ {author}  {}", format_now());
+        let author_line = format!("┊ {author}  {}", panel::format_now());
 
         let line_count = buf.line_count()?;
         let mut new_lines: Vec<String> = Vec::new();
@@ -264,7 +263,7 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
         let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
-        clear_status(buf)?;
+        panel::clear_status(buf)?;
         let line_count = buf.line_count()?;
         let all_lines: Vec<String> = buf
             .get_lines(0..line_count, false)?
@@ -354,8 +353,8 @@ pub fn append_interrupted() -> nvim_oxi::Result<()> {
         let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
         api::set_option_value("modifiable", true, &buf_opts)?;
 
-        let line_count = clear_status(buf)?;
-        let text = format!("{INTERRUPTED_PREFIX}{}", format_now());
+        let line_count = panel::clear_status(buf)?;
+        let text = format!("{INTERRUPTED_PREFIX}{}", panel::format_now());
         buf.set_lines(line_count..line_count, false, [text.as_str()])?;
 
         api::set_option_value("modifiable", false, &buf_opts)?;
@@ -366,28 +365,6 @@ pub fn append_interrupted() -> nvim_oxi::Result<()> {
         scroll_to_bottom(buf);
         Ok(())
     })
-}
-
-/// Removes the trailing status line if present. Returns the updated line count.
-fn clear_status(buf: &mut Buffer) -> nvim_oxi::Result<usize> {
-    let line_count = buf.line_count()?;
-    if line_count == 0 {
-        return Ok(0);
-    }
-    let has_status = buf
-        .get_lines((line_count - 1)..line_count, false)?
-        .next()
-        .map(|s| s.to_string_lossy().starts_with(STATUS_PREFIX))
-        .unwrap_or(false);
-    if has_status {
-        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
-        api::set_option_value("modifiable", true, &buf_opts)?;
-        buf.set_lines((line_count - 1)..line_count, false, Vec::<&str>::new())?;
-        api::set_option_value("modifiable", false, &buf_opts)?;
-        Ok(line_count - 1)
-    } else {
-        Ok(line_count)
-    }
 }
 
 /// Appends streaming text from the agent.
@@ -403,72 +380,8 @@ pub fn append_streaming(text: &str) -> nvim_oxi::Result<()> {
         let Some(buf) = guard.as_mut() else {
             return Ok(());
         };
-
-        clear_status(buf)?;
-
-        let line_count = buf.line_count()?;
-        let all_lines: Vec<String> = buf
-            .get_lines(0..line_count, false)?
-            .map(|s| s.to_string())
-            .collect();
-
-        let last_author_is_agent = all_lines
-            .iter()
-            .rev()
-            .find(|l| l.starts_with("┊ "))
-            .map(|l| l.starts_with("┊ agent"))
-            .unwrap_or(false);
-
-        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
-        api::set_option_value("modifiable", true, &buf_opts)?;
-
-        if !last_author_is_agent {
-            let author_line = format!("┊ agent  {}", format_now());
-            let has_content = line_count > 0;
-            let mut insert: Vec<String> = Vec::new();
-            if has_content {
-                insert.push(SEPARATOR.to_string());
-                insert.push(String::new());
-            }
-            let author_offset = insert.len();
-            insert.push(author_line);
-            for l in text.split('\n') {
-                insert.push(format!("  {l}"));
-            }
-            let refs: Vec<&str> = insert.iter().map(|s| s.as_str()).collect();
-            buf.set_lines(line_count..line_count, false, refs)?;
-
-            let ns = api::create_namespace("arbiter-thread-win");
-            if has_content {
-                let _ = buf.add_highlight(ns, "NonText", line_count, 0..);
-            }
-            let _ = buf.add_highlight(ns, "ArbiterThreadAgent", line_count + author_offset, 0..);
-        } else {
-            let last_idx = line_count.saturating_sub(1);
-            let last = all_lines.last().map(|s| s.as_str()).unwrap_or_default();
-
-            let segments: Vec<&str> = text.split('\n').collect();
-            let first = segments[0];
-            let combined = if last.starts_with("  ") {
-                format!("{last}{first}")
-            } else {
-                format!("  {first}")
-            };
-            buf.set_lines(last_idx..=last_idx, false, [combined.as_str()])?;
-
-            if segments.len() > 1 {
-                let new_count = buf.line_count()?;
-                let remaining: Vec<String> =
-                    segments[1..].iter().map(|l| format!("  {l}")).collect();
-                let refs: Vec<&str> = remaining.iter().map(|s| s.as_str()).collect();
-                buf.set_lines(new_count..new_count, false, refs)?;
-            }
-        }
-
-        api::set_option_value("modifiable", false, &buf_opts)?;
-
+        panel::append_streaming_to_buf(buf, text, "arbiter-thread-win")?;
         scroll_to_bottom(buf);
-
         Ok(())
     })
 }
@@ -533,6 +446,80 @@ pub fn append_revision_summary(
 
         scroll_to_bottom(buf);
         Ok(())
+    })
+}
+
+/// Appends similar-thread cross-references to the thread panel.
+///
+/// Each entry is rendered as a clickable line. Pressing `<CR>` on one
+/// navigates the diff panel to that thread's file and line.
+pub fn append_similar_threads(refs: &[super::SimilarRef]) -> nvim_oxi::Result<()> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    BUFFER.with(|c| {
+        let mut guard = c.borrow_mut();
+        let Some(buf) = guard.as_mut() else {
+            return Ok(());
+        };
+        let line_count = buf.line_count()?;
+        let mut new_lines: Vec<String> = Vec::new();
+        if line_count > 0 {
+            new_lines.push(SEPARATOR.to_string());
+            new_lines.push(String::new());
+        }
+        let header_offset = new_lines.len();
+        new_lines.push("  ◇ similar issues".to_string());
+
+        let mut map_entries: Vec<(usize, String)> = Vec::new();
+        for r in refs {
+            let preview: String = r.preview.chars().take(40).collect();
+            let entry_line = line_count + new_lines.len();
+            new_lines.push(format!("    {}:{} - {preview}", r.file, r.line));
+            map_entries.push((entry_line, r.thread_id.clone()));
+        }
+        new_lines.push(String::new());
+
+        let str_refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
+        let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+        api::set_option_value("modifiable", true, &buf_opts)?;
+        buf.set_lines(line_count..line_count, false, str_refs)?;
+        api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        if line_count > 0 {
+            let _ = buf.add_highlight(ns, "NonText", line_count, 0..);
+        }
+        let _ = buf.add_highlight(ns, "ArbiterSimilarHeader", line_count + header_offset, 0..);
+        for i in 0..refs.len() {
+            let _ = buf.add_highlight(
+                ns,
+                "ArbiterSimilarRef",
+                line_count + header_offset + 1 + i,
+                0..,
+            );
+        }
+
+        SIMILAR_MAP.with(|m| m.borrow_mut().extend(map_entries));
+
+        scroll_to_bottom(buf);
+        Ok(())
+    })
+}
+
+/// Returns the thread ID if the cursor is on a similar-thread line.
+pub fn similar_at_cursor() -> Option<String> {
+    WINDOW.with(|w| {
+        let guard = w.borrow();
+        let win = guard.as_ref()?;
+        let (row, _) = win.get_cursor().into_result().ok()?;
+        let buf_line = row.saturating_sub(1);
+        SIMILAR_MAP.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(line, _)| *line == buf_line)
+                .map(|(_, tid)| tid.clone())
+        })
     })
 }
 
@@ -614,6 +601,8 @@ pub fn close() {
         c.borrow_mut().take();
     });
     ON_REVISION.with(|c| c.borrow_mut().take());
+    ON_SIMILAR.with(|c| c.borrow_mut().take());
+    SIMILAR_MAP.with(|c| c.borrow_mut().clear());
     if let Some(cb) = cb {
         cb();
     }
@@ -622,6 +611,11 @@ pub fn close() {
 /// Returns true if the thread panel is open.
 pub fn is_open() -> bool {
     WINDOW.with(|c| c.borrow().is_some())
+}
+
+/// Returns the thread panel window handle, if open.
+pub fn handle() -> Option<Window> {
+    WINDOW.with(|c| c.borrow().clone())
 }
 
 /// Returns the thread ID currently displayed in the panel, if any.

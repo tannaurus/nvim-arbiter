@@ -3,14 +3,19 @@
 //! Registers global and gated commands. Gated commands require an active
 //! review and show a notification when none is open.
 
+mod self_review;
+
 use crate::backend;
 use crate::config;
 use crate::git;
+use crate::prompt_panel;
+use crate::prompts;
 use crate::response_panel;
 use crate::review;
+use crate::rules;
 use crate::state;
 use crate::threads;
-use crate::types::ThreadOrigin;
+use crate::types::{ThreadOrigin, ThreadStatus};
 use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::opts::CreateCommandOpts;
 use nvim_oxi::api::opts::OptionOpts;
@@ -82,6 +87,19 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
         },
         &CreateCommandOpts::builder()
             .nargs(CommandNArgs::ZeroOrOne)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterPrompt",
+        |args: CommandArgs| {
+            let conv_id = args.fargs.join(" ");
+            with_review_cmd(|_r| {
+                let _ = prompt_panel::toggle(&conv_id);
+            });
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Any)
             .build(),
     )?;
 
@@ -337,6 +355,11 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
                 let cfg = config::get();
                 let prompt_guidance = cfg.prompts.self_review.clone();
                 let is_cursor = matches!(cfg.backend, config::BackendKind::Cursor);
+                let project_rules_text = rules::format_for_prompt(&rules::resolve(
+                    &r.project_rules,
+                    rules::Scenario::SelfReview,
+                    None,
+                ));
                 git::diff_full(&cwd, &ref_name, move |result| {
                     let diff_text = if result.success() {
                         result.stdout
@@ -348,8 +371,11 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
                         );
                         return;
                     };
-                    let full_template =
+                    let mut full_template =
                         format!("{}{}", prompt_guidance, config::SELF_REVIEW_FORMAT_SUFFIX);
+                    if !project_rules_text.is_empty() {
+                        full_template = format!("{project_rules_text}\n{full_template}");
+                    }
                     let prompt = full_template.replace("%s", &diff_text);
                     let json_schema = if is_cursor {
                         None
@@ -386,54 +412,49 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
                                     })
                                     .collect::<Vec<_>>()
                             };
-                            review::with_active(|r| {
-                                for (file, line, message) in parsed {
-                                    let full_path = Path::new(&r.cwd).join(&file);
-                                    let contents =
-                                        std::fs::read_to_string(&full_path).unwrap_or_default();
-                                    let file_lines: Vec<&str> = contents.lines().collect();
-                                    let anchor_content = file_lines
-                                        .get(line.saturating_sub(1) as usize)
-                                        .map(|s| (*s).to_string())
-                                        .unwrap_or_default();
-                                    let ctx_start = line.saturating_sub(2) as usize;
-                                    let ctx_end = (line + 2).min(file_lines.len() as u32) as usize;
-                                    let context: Vec<String> = file_lines
-                                        .get(ctx_start..ctx_end)
-                                        .unwrap_or(&[])
-                                        .iter()
-                                        .map(|s| s.to_string())
-                                        .collect();
-                                    let thread = threads::create(
-                                        &file,
-                                        line,
-                                        &message,
-                                        threads::CreateOpts {
-                                            pending: false,
-                                            immediate: true,
-                                            auto_resolve: false,
-                                            origin: ThreadOrigin::Agent,
-                                            anchor_content,
-                                            anchor_context: context,
-                                        },
-                                    );
-                                    r.threads.push(thread);
-                                }
-                                let sd = r.config.state_dir();
-                                let ws_hash = state::workspace_hash(Path::new(&r.cwd));
-                                state::save_threads(&sd, &ws_hash, &r.ref_name, &r.threads);
-                                if let Some(path) = r.current_file.clone() {
-                                    review::select_file_impl(r, &path);
-                                }
-                                let _ = api::notify(
-                                    "Self-review complete",
-                                    LogLevel::Info,
-                                    &Dictionary::default(),
-                                );
-                            });
+                            if let Some(new_thread_ids) =
+                                review::with_active(|r| self_review::create_threads(r, &parsed))
+                            {
+                                self_review::detect_similar(new_thread_ids);
+                            }
                         }),
                     );
                 });
+            });
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterApply",
+        |_args: CommandArgs| {
+            with_review_cmd(|r| {
+                let items: Vec<(String, u32, String)> = r
+                    .threads
+                    .iter()
+                    .filter(|t| t.origin == ThreadOrigin::Agent && t.status == ThreadStatus::Open)
+                    .map(|t| {
+                        let msg = t
+                            .messages
+                            .first()
+                            .map(|m| m.text.clone())
+                            .unwrap_or_default();
+                        (t.file.clone(), t.line, msg)
+                    })
+                    .collect();
+
+                if items.is_empty() {
+                    let _ = api::notify(
+                        "No open self-review threads to apply",
+                        LogLevel::Info,
+                        &Dictionary::default(),
+                    );
+                    return;
+                }
+
+                self_review::show_apply_confirmation(items);
             });
         },
         &CreateCommandOpts::builder()
@@ -576,11 +597,65 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
             .build(),
     )?;
 
+    api::create_user_command(
+        "ArbiterReloadRules",
+        |_args: CommandArgs| {
+            with_review_cmd(|r| {
+                r.project_rules = rules::load_all(&r.cwd, &r.config.rules_dirs);
+                let _ = api::notify(
+                    &format!("[arbiter] reloaded {} project rules", r.project_rules.len()),
+                    LogLevel::Info,
+                    &Dictionary::default(),
+                );
+            });
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
     Ok(())
 }
 
 fn open_rules_window(r: &mut review::Review) {
-    let rules = r.review_rules.clone();
+    let review_rules = r.review_rules.clone();
+    let project_rules = &r.project_rules;
+
+    let mut lines: Vec<String> = Vec::new();
+    if !project_rules.is_empty() {
+        lines.push("## Project Rules (read-only, from disk)".to_string());
+        lines.push(String::new());
+        for pr in project_rules {
+            let scenarios: Vec<&str> = pr
+                .scenarios
+                .iter()
+                .map(|s| match s {
+                    rules::Scenario::Thread => "thread",
+                    rules::Scenario::SelfReview => "self_review",
+                })
+                .collect();
+            let scope = if scenarios.is_empty() {
+                "all".to_string()
+            } else {
+                scenarios.join(", ")
+            };
+            let globs = if pr.match_patterns.is_empty() {
+                "*".to_string()
+            } else {
+                pr.match_patterns.join(", ")
+            };
+            lines.push(format!("- **{}** [{}] ({})", pr.description, scope, globs));
+            for content_line in pr.content.lines() {
+                lines.push(format!("  {content_line}"));
+            }
+        }
+        lines.push(String::new());
+    }
+    lines.push("## Learned Rules (one per line, :w to save, q to close)".to_string());
+    lines.push(String::new());
+    for rule in &review_rules {
+        lines.push(rule.clone());
+    }
 
     let mut buf = match api::create_buf(false, true) {
         Ok(b) => b,
@@ -590,7 +665,7 @@ fn open_rules_window(r: &mut review::Review) {
     let _ = api::set_option_value("buftype", "acwrite", &buf_opts);
     let _ = api::set_option_value("filetype", "markdown", &buf_opts);
 
-    let refs: Vec<&str> = rules.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
     if !refs.is_empty() {
         let _ = buf.set_lines(0..0, false, refs);
     }
@@ -670,6 +745,20 @@ fn open_rules_window(r: &mut review::Review) {
     let _ = buf.set_keymap(Mode::Normal, "q", "", &opts_q);
 }
 
+fn extract_learned_rules(buf_content: &[String]) -> Vec<String> {
+    let start = buf_content
+        .iter()
+        .position(|l| l.starts_with("## Learned Rules"))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+
+    buf_content[start..]
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
 fn save_rules_from_buf(buf: &Buffer) {
     let line_count = buf.line_count().unwrap_or(0);
     if line_count == 0 {
@@ -683,11 +772,12 @@ fn save_rules_from_buf(buf: &Buffer) {
         Ok(l) => l,
         Err(_) => return,
     };
-    let rules: Vec<String> = lines
+    let all: Vec<String> = lines
         .into_iter()
         .map(|l| l.to_string_lossy().to_string())
-        .filter(|l| !l.trim().is_empty())
         .collect();
+
+    let rules = extract_learned_rules(&all);
     review::with_active(|r| {
         r.review_rules = rules;
         review::save_file_statuses_pub(r);
@@ -697,4 +787,47 @@ fn save_rules_from_buf(buf: &Buffer) {
         LogLevel::Info,
         &Dictionary::default(),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_learned_rules_finds_header() {
+        let buf = vec![
+            "## Project Rules (read-only, from disk)".to_string(),
+            "- some project rule".to_string(),
+            "".to_string(),
+            "## Learned Rules (one per line, :w to save, q to close)".to_string(),
+            "".to_string(),
+            "always use snake_case".to_string(),
+            "prefer match over if-let chains".to_string(),
+        ];
+        let rules = extract_learned_rules(&buf);
+        assert_eq!(
+            rules,
+            vec!["always use snake_case", "prefer match over if-let chains"]
+        );
+    }
+
+    #[test]
+    fn extract_learned_rules_no_header() {
+        let buf = vec!["some random line".to_string(), "another line".to_string()];
+        let rules = extract_learned_rules(&buf);
+        assert_eq!(rules, vec!["some random line", "another line"]);
+    }
+
+    #[test]
+    fn extract_learned_rules_empty_after_header() {
+        let buf = vec![
+            "## Project Rules".to_string(),
+            "- rule one".to_string(),
+            "## Learned Rules".to_string(),
+            "".to_string(),
+            "   ".to_string(),
+        ];
+        let rules = extract_learned_rules(&buf);
+        assert!(rules.is_empty());
+    }
 }

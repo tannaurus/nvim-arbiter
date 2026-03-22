@@ -60,7 +60,6 @@ fn update_indicators() {
         state::load_threads(&sd, &ws_hash, &ref_name)
     };
 
-    let rel_path = rel_path.trim_start_matches('/').to_string();
     let open_threads: Vec<_> = threads
         .into_iter()
         .filter(|t| t.file == rel_path && t.status == ThreadStatus::Open)
@@ -105,6 +104,7 @@ fn update_indicators() {
                         t.line,
                         &t.messages,
                         on_reply,
+                        None,
                         None,
                         None,
                     );

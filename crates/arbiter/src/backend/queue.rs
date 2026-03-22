@@ -35,11 +35,11 @@ fn get_adapter() -> Option<Arc<dyn Adapter + Send + Sync>> {
 
 /// A single queued backend call.
 pub(super) struct QueueItem {
-    pub opts: BackendOpts,
-    pub on_stream: Option<OnStream>,
-    pub callback: OnComplete,
+    pub(super) opts: BackendOpts,
+    pub(super) on_stream: Option<OnStream>,
+    pub(super) callback: OnComplete,
     /// Optional tag for scoped cancellation (typically a thread ID).
-    pub tag: Option<String>,
+    pub(super) tag: Option<String>,
 }
 
 static QUEUE: Mutex<VecDeque<QueueItem>> = Mutex::new(VecDeque::new());

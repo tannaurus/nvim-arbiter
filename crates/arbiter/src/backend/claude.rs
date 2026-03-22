@@ -68,13 +68,7 @@ impl ClaudeAdapter {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct JsonResponse {
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    result: String,
-}
+use super::response::parse_json_response;
 
 #[derive(Debug, serde::Deserialize)]
 struct StreamEvent {
@@ -291,16 +285,6 @@ impl Adapter for ClaudeAdapter {
     }
 }
 
-fn parse_json_response(stdout: &str) -> Result<BackendResult, String> {
-    let parsed: JsonResponse =
-        serde_json::from_str(stdout).map_err(|e| format!("malformed JSON: {e}"))?;
-    Ok(BackendResult {
-        text: parsed.result,
-        session_id: parsed.session_id,
-        error: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,33 +299,91 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_args_ask_mode() {
-        let a = ClaudeAdapter::new(default_config());
-        let opts = BackendOpts {
-            op: BackendOp::NewSession,
-            prompt: "hi".to_string(),
-            ask_mode: true,
-            stream: false,
-            json_schema: None,
-        };
-        let args = a.build_args(&opts);
-        assert!(args.contains(&"--permission-mode".to_string()));
-        assert!(args.contains(&"plan".to_string()));
-    }
-
-    #[test]
-    fn build_args_json_schema() {
-        let a = ClaudeAdapter::new(default_config());
-        let opts = BackendOpts {
+    fn new_session_opts() -> BackendOpts {
+        BackendOpts {
             op: BackendOp::NewSession,
             prompt: "hi".to_string(),
             ask_mode: false,
             stream: false,
-            json_schema: Some(r#"{"type":"object"}"#.to_string()),
+            json_schema: None,
+        }
+    }
+
+    fn assert_arg_value(args: &[String], flag: &str, expected: &str) {
+        let i = args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(
+            args.get(i + 1).map(String::as_str),
+            Some(expected),
+            "after {flag}: {args:?}"
+        );
+    }
+
+    #[test]
+    fn build_args_new_session() {
+        let a = ClaudeAdapter::new(default_config());
+        let args = a.build_args(&new_session_opts());
+        assert_eq!(args.first().map(String::as_str), Some("-p"));
+        assert_eq!(args.get(1).map(String::as_str), Some("hi"));
+        assert_arg_value(&args, "--output-format", "json");
+        assert!(!args.iter().any(|a| a == "--resume"));
+        assert!(!args.iter().any(|a| a == "--continue"));
+    }
+
+    #[test]
+    fn build_args_continue_latest() {
+        let a = ClaudeAdapter::new(default_config());
+        let opts = BackendOpts {
+            op: BackendOp::ContinueLatest,
+            ..new_session_opts()
         };
         let args = a.build_args(&opts);
-        assert!(args.contains(&"--json-schema".to_string()));
+        assert!(args.iter().any(|a| a == "--continue"));
+        assert!(!args.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn build_args_resume() {
+        let a = ClaudeAdapter::new(default_config());
+        let opts = BackendOpts {
+            op: BackendOp::Resume("sess-123".to_string()),
+            ..new_session_opts()
+        };
+        let args = a.build_args(&opts);
+        assert_arg_value(&args, "--resume", "sess-123");
+        assert!(!args.iter().any(|a| a == "--continue"));
+    }
+
+    #[test]
+    fn build_args_stream() {
+        let a = ClaudeAdapter::new(default_config());
+        let opts = BackendOpts {
+            stream: true,
+            ..new_session_opts()
+        };
+        let args = a.build_args(&opts);
+        assert_arg_value(&args, "--output-format", "stream-json");
+        assert!(args.iter().any(|a| a == "--include-partial-messages"));
+    }
+
+    #[test]
+    fn build_args_ask_mode() {
+        let a = ClaudeAdapter::new(default_config());
+        let opts = BackendOpts {
+            ask_mode: true,
+            ..new_session_opts()
+        };
+        let args = a.build_args(&opts);
+        assert_arg_value(&args, "--permission-mode", "plan");
+    }
+
+    #[test]
+    fn build_args_model() {
+        let a = ClaudeAdapter::new(BackendConfig {
+            model: Some("claude-3".to_string()),
+            ..default_config()
+        });
+        let args = a.build_args(&new_session_opts());
+        assert_arg_value(&args, "--model", "claude-3");
     }
 
     #[test]
@@ -350,15 +392,30 @@ mod tests {
             workspace: Some("/tmp/ws".to_string()),
             ..default_config()
         });
+        let args = a.build_args(&new_session_opts());
+        assert_arg_value(&args, "--add-dir", "/tmp/ws");
+    }
+
+    #[test]
+    fn build_args_extra_args() {
+        let a = ClaudeAdapter::new(BackendConfig {
+            extra_args: vec!["--verbose".to_string(), "--foo".to_string()],
+            ..default_config()
+        });
+        let args = a.build_args(&new_session_opts());
+        assert!(args.iter().any(|a| a == "--verbose"));
+        assert!(args.iter().any(|a| a == "--foo"));
+    }
+
+    #[test]
+    fn build_args_json_schema() {
+        let schema = r#"{"type":"object"}"#;
+        let a = ClaudeAdapter::new(default_config());
         let opts = BackendOpts {
-            op: BackendOp::NewSession,
-            prompt: "hi".to_string(),
-            ask_mode: false,
-            stream: false,
-            json_schema: None,
+            json_schema: Some(schema.to_string()),
+            ..new_session_opts()
         };
         let args = a.build_args(&opts);
-        assert!(args.contains(&"--add-dir".to_string()));
-        assert!(args.contains(&"/tmp/ws".to_string()));
+        assert_arg_value(&args, "--json-schema", schema);
     }
 }

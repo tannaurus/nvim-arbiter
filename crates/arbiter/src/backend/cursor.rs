@@ -321,23 +321,7 @@ struct StreamContent {
     text: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct JsonResponse {
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    result: String,
-}
-
-fn parse_json_response(stdout: &str) -> Result<BackendResult, String> {
-    let parsed: JsonResponse =
-        serde_json::from_str(stdout).map_err(|e| format!("malformed JSON: {e}"))?;
-    Ok(BackendResult {
-        text: parsed.result,
-        session_id: parsed.session_id,
-        error: None,
-    })
-}
+use super::response::parse_json_response;
 
 #[cfg(test)]
 mod tests {
@@ -479,32 +463,6 @@ mod tests {
         let args = a.build_args(&opts);
         assert!(args.contains(&"--yolo".to_string()));
         assert!(args.contains(&"--custom-flag".to_string()));
-    }
-
-    #[test]
-    fn parse_json_response_valid() {
-        let j = r#"{"session_id": "sess-123", "result": "Hello"}"#;
-        let r = parse_json_response(j).unwrap();
-        assert_eq!(r.session_id, "sess-123");
-        assert_eq!(r.text, "Hello");
-        assert!(r.error.is_none());
-    }
-
-    #[test]
-    fn parse_json_response_actual_cli_format() {
-        let j = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":2438,"result":"Hello!","session_id":"641faf9d-ffae-43cc-a6d7-a546c686fb31","request_id":"abc","usage":{"inputTokens":3}}"#;
-        let r = parse_json_response(j).unwrap();
-        assert_eq!(r.session_id, "641faf9d-ffae-43cc-a6d7-a546c686fb31");
-        assert_eq!(r.text, "Hello!");
-        assert!(r.error.is_none());
-    }
-
-    #[test]
-    fn parse_json_response_malformed() {
-        let j = "not json";
-        let r = parse_json_response(j);
-        assert!(r.is_err());
-        assert!(r.unwrap_err().contains("malformed"));
     }
 
     #[test]

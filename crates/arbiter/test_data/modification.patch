@@ -1,0 +1,12 @@
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,6 @@
+ use std::io;
++use std::fs;
+ 
+ fn main() {
+-    println!("hello");
++    println!("hello world");
++    fs::read_to_string("config.toml").ok();
+ }

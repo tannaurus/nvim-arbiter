@@ -1,0 +1,18 @@
+---
+source: crates/arbiter/src/prompts.rs
+assertion_line: 919
+expression: output
+---
+This is a code review of changes compared against `main`.
+
+Project rules:
+- [Naming] Use snake_case for all function names
+
+Reviewer preferences (established during this review):
+- Use constants for status codes
+
+Apply all 3 of the following review comments to the codebase. Each item specifies a file, line number, and the requested change.
+
+1. src/api/handler.rs:45 - Replace magic number 200 with HTTP_OK constant
+2. src/api/handler.rs:78 - Add timeout parameter to this HTTP call
+3. src/db/connection.rs:12 - Connection pool size should come from config, not hardcoded

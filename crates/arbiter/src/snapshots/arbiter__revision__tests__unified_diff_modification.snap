@@ -1,0 +1,25 @@
+---
+source: crates/arbiter/src/revision.rs
+assertion_line: 646
+expression: output
+---
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,11 +1,14 @@
+ use std::io;
++use std::fmt;
+ 
+ fn main() {
++    let name = "universe";
+-    let name = "world";
+     println!("hello {}", name);
++    setup();
+     do_work();
+ }
+ 
+ fn do_work() {
++    println!("working hard...");
++    cleanup();
+-    println!("working...");
+ }

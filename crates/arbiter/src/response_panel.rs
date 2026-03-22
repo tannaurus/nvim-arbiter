@@ -265,12 +265,12 @@ fn close_float() {
     });
 }
 
-/// Returns true if the response panel (split) is open.
+/// Returns true if the response panel (split) is open and its window is valid.
 pub(crate) fn panel_is_open() -> bool {
-    PANEL_WIN.with(|c| c.borrow().is_some())
+    PANEL_WIN.with(|c| c.borrow().as_ref().map(|w| w.is_valid()).unwrap_or(false))
 }
 
-/// Returns true if the response float is open.
+/// Returns true if the response float is open and its window is valid.
 pub(crate) fn float_is_open() -> bool {
-    FLOAT_WIN.with(|c| c.borrow().is_some())
+    FLOAT_WIN.with(|c| c.borrow().as_ref().map(|w| w.is_valid()).unwrap_or(false))
 }

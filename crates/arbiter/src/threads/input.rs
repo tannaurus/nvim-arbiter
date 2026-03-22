@@ -1,6 +1,10 @@
 //! Input panel for new comments and thread replies.
 //!
-//! Opens as a small bottom split. `<CR>` submits; `q` or `<Esc>` cancels.
+//! Opens as a small split. By default splits at the screen bottom
+//! (`botright`). When a target window is provided via `open_below`,
+//! splits directly below that window (`belowright`) so the input
+//! stays visually attached to the thread panel.
+//! `<CR>` submits; `q` or `<Esc>` cancels.
 
 use crate::config;
 use nvim_oxi::api::opts::{OptionOpts, SetKeymapOpts};
@@ -26,6 +30,27 @@ pub type OnCancel = Box<dyn FnOnce() + Send>;
 /// `title` is shown as the first line of the buffer.
 /// `<CR>` invokes `on_submit` with the buffer content; `q` or `<Esc>` invokes `on_cancel`.
 pub fn open(title: &str, on_submit: OnSubmit, on_cancel: OnCancel) -> nvim_oxi::Result<()> {
+    open_impl(title, on_submit, on_cancel, None)
+}
+
+/// Opens the input split directly below `target` instead of at the screen bottom.
+///
+/// Used for thread replies so the input appears inside the thread panel area.
+pub fn open_below(
+    title: &str,
+    on_submit: OnSubmit,
+    on_cancel: OnCancel,
+    target: &Window,
+) -> nvim_oxi::Result<()> {
+    open_impl(title, on_submit, on_cancel, Some(target))
+}
+
+fn open_impl(
+    title: &str,
+    on_submit: OnSubmit,
+    on_cancel: OnCancel,
+    target: Option<&Window>,
+) -> nvim_oxi::Result<()> {
     if is_open() {
         close();
     }
@@ -39,7 +64,13 @@ pub fn open(title: &str, on_submit: OnSubmit, on_cancel: OnCancel) -> nvim_oxi::
         INPUT_HEIGHT.min(tw.size / 3).max(3)
     };
 
-    api::command(&format!("botright {input_height}split"))?;
+    if let Some(win) = target {
+        let _ = api::set_current_win(win);
+        api::command(&format!("belowright {input_height}split"))?;
+    } else {
+        api::command(&format!("botright {input_height}split"))?;
+    }
+
     let mut win = api::get_current_win();
     win.set_buf(&buf)?;
 

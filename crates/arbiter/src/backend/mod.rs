@@ -7,6 +7,7 @@ mod adapter;
 mod claude;
 mod cursor;
 mod queue;
+mod response;
 
 use crate::types::{BackendOp, BackendOpts, OnComplete, OnStream};
 pub(crate) use adapter::Adapter;
@@ -18,13 +19,13 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub(crate) struct BackendConfig {
     /// `"cursor"` or `"claude"`.
-    pub backend: String,
+    pub(crate) backend: String,
     /// Optional model override.
-    pub model: Option<String>,
+    pub(crate) model: Option<String>,
     /// Workspace root. Passed to CLI as --workspace or --add-dir.
-    pub workspace: Option<String>,
+    pub(crate) workspace: Option<String>,
     /// Extra CLI flags appended to every invocation.
-    pub extra_args: Vec<String>,
+    pub(crate) extra_args: Vec<String>,
 }
 
 impl Default for BackendConfig {
@@ -53,7 +54,6 @@ pub(crate) fn set_on_item_started(cb: Box<dyn Fn(&str) + Send + Sync>) {
 /// Call `setup_with_adapter` from tests to inject a mock.
 pub(crate) fn setup(config: BackendConfig) {
     let adapter: Arc<dyn Adapter + Send + Sync> = match config.backend.as_str() {
-        "cursor" => Arc::new(cursor::CursorAdapter::new(config)),
         "claude" => Arc::new(claude::ClaudeAdapter::new(config)),
         _ => Arc::new(cursor::CursorAdapter::new(config)),
     };
@@ -366,9 +366,9 @@ pub(crate) fn continue_prompt(prompt: &str, on_stream: Option<OnStream>, callbac
 /// Parsed thread from Cursor self-review text response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedThread {
-    pub file: String,
-    pub line: u32,
-    pub message: String,
+    pub(crate) file: String,
+    pub(crate) line: u32,
+    pub(crate) message: String,
 }
 
 /// Parses THREAD|file|line|message lines from Cursor self-review text.
@@ -411,11 +411,11 @@ mod tests {
     use crate::types::BackendResult;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Serializes tests that touch global queue state (ADAPTER, QUEUE,
-    /// PROCESSING, GENERATION). Without this, concurrent tests can increment
-    /// GENERATION via `cancel_all`, causing another test's guarded callbacks
-    /// to no-op on the generation check.
     static QUEUE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn acquire_queue_lock() -> std::sync::MutexGuard<'static, ()> {
+        QUEUE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     struct MockAdapter {
         responses: std::sync::Mutex<std::collections::VecDeque<BackendResult>>,
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn queue_fifo_order() {
-        let _lock = QUEUE_LOCK.lock().expect("test lock");
+        let _lock = acquire_queue_lock();
         setup_with_adapter(Arc::new(MockAdapter::new(vec![
             BackendResult {
                 text: "a".to_string(),
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn is_busy_returns_true_while_processing() {
-        let _lock = QUEUE_LOCK.lock().expect("test lock");
+        let _lock = acquire_queue_lock();
         let adapter = Arc::new(MockAdapter::new(vec![BackendResult {
             text: String::new(),
             session_id: String::new(),
@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn thread_reply_uses_resume() {
-        let _lock = QUEUE_LOCK.lock().expect("test lock");
+        let _lock = acquire_queue_lock();
         let opts_cell = Arc::new(std::sync::Mutex::new(None));
         let opts_cell_clone = Arc::clone(&opts_cell);
 
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn self_review_uses_new_session_no_stream() {
-        let _lock = QUEUE_LOCK.lock().expect("test lock");
+        let _lock = acquire_queue_lock();
         let opts_cell = Arc::new(std::sync::Mutex::new(None));
         let opts_cell_clone = Arc::clone(&opts_cell);
 
@@ -611,6 +611,7 @@ mod tests {
 
     #[test]
     fn parse_self_review_valid_input() {
+        let _lock = acquire_queue_lock();
         let t = parse_self_review_text(
             "THREAD|src/main.rs|22|Should this return 401 or 403?\n\
              THREAD|src/auth.rs|15|Consider caching the token lookup.\n\
@@ -627,6 +628,7 @@ mod tests {
 
     #[test]
     fn parse_self_review_mixed_valid_invalid() {
+        let _lock = acquire_queue_lock();
         let t = parse_self_review_text(
             "THREAD|a.rs|1|ok\n\
              garbage line\n\
@@ -639,17 +641,20 @@ mod tests {
 
     #[test]
     fn parse_self_review_empty() {
+        let _lock = acquire_queue_lock();
         assert!(parse_self_review_text("").is_empty());
     }
 
     #[test]
     fn parse_self_review_missing_fields_discarded() {
-        let t = parse_self_review_text("THREAD|a|1\n"); // only 2 parts
+        let _lock = acquire_queue_lock();
+        let t = parse_self_review_text("THREAD|a|1\n");
         assert!(t.is_empty());
     }
 
     #[test]
     fn parse_self_review_lenient_strips_markdown() {
+        let _lock = acquire_queue_lock();
         let t = parse_self_review_text(
             "- THREAD|a.rs|1|msg\n\
              * THREAD|b.rs|2|msg\n\
@@ -663,6 +668,7 @@ mod tests {
 
     #[test]
     fn parse_self_review_thread_prefix_variants() {
+        let _lock = acquire_queue_lock();
         let t = parse_self_review_text(
             "THREAD: |x.rs|1|msg\n\
              THREAD |y.rs|2|msg",
@@ -674,7 +680,7 @@ mod tests {
 
     #[test]
     fn cancel_all_clears_pending() {
-        let _lock = QUEUE_LOCK.lock().expect("test lock");
+        let _lock = acquire_queue_lock();
         setup_with_adapter(Arc::new(MockAdapter::new(vec![])));
 
         for i in 0..3 {
@@ -701,6 +707,7 @@ mod tests {
 
     #[test]
     fn parse_self_review_text_preserves_pipe_in_message() {
+        let _lock = acquire_queue_lock();
         let t = parse_self_review_text("THREAD|file.rs|1|message with | pipe");
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].file, "file.rs");
@@ -729,6 +736,7 @@ mod tests {
 
     #[test]
     fn track_and_untrack_child() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -744,6 +752,7 @@ mod tests {
 
     #[test]
     fn untrack_only_removes_matching_handle() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -765,6 +774,7 @@ mod tests {
 
     #[test]
     fn untrack_nonexistent_handle_is_noop() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -782,6 +792,7 @@ mod tests {
 
     #[test]
     fn shutdown_kills_tracked_children() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -803,6 +814,7 @@ mod tests {
 
     #[test]
     fn shutdown_with_no_children_is_noop() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -814,6 +826,7 @@ mod tests {
 
     #[test]
     fn shutdown_is_idempotent() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
@@ -831,11 +844,341 @@ mod tests {
 
     #[test]
     fn is_shutdown_lifecycle() {
+        let _queue = acquire_queue_lock();
         let _lock = CHILD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_shutdown();
 
         assert!(!is_shutdown());
         shutdown();
         assert!(is_shutdown());
+    }
+
+    struct BlockFirstAdapter {
+        first_entered: AtomicBool,
+        barrier: Arc<std::sync::Barrier>,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Adapter for BlockFirstAdapter {
+        fn execute(&self, opts: BackendOpts, _: Option<OnStream>, callback: OnComplete) {
+            self.calls.lock().expect("lock").push(opts.prompt.clone());
+            if !self.first_entered.swap(true, Ordering::SeqCst) {
+                let barrier = Arc::clone(&self.barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (callback)(BackendResult {
+                        text: String::new(),
+                        session_id: String::new(),
+                        error: None,
+                    });
+                });
+            } else {
+                (callback)(BackendResult {
+                    text: String::new(),
+                    session_id: String::new(),
+                    error: None,
+                });
+            }
+        }
+    }
+
+    fn block_first_adapter() -> (Arc<BlockFirstAdapter>, Arc<std::sync::Barrier>) {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let adapter = Arc::new(BlockFirstAdapter {
+            first_entered: AtomicBool::new(false),
+            barrier: Arc::clone(&barrier),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        (adapter, barrier)
+    }
+
+    fn opts(prompt: &str) -> BackendOpts {
+        BackendOpts {
+            op: BackendOp::NewSession,
+            prompt: prompt.to_string(),
+            ask_mode: false,
+            stream: false,
+            json_schema: None,
+        }
+    }
+
+    #[test]
+    fn send_priority_inserts_at_front() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+        let (adapter, barrier) = block_first_adapter();
+        setup_with_adapter(adapter.clone());
+
+        send(opts("blocker"), None, Box::new(|_| {}));
+        send(opts("regular"), None, Box::new(|_| {}));
+        send_priority(opts("priority"), Box::new(|_| {}));
+
+        barrier.wait();
+        while is_busy() {
+            std::thread::yield_now();
+        }
+
+        let calls = adapter.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], "blocker");
+        assert_eq!(calls[1], "priority");
+        assert_eq!(calls[2], "regular");
+    }
+
+    #[test]
+    fn cancel_tagged_only_removes_matching() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+        let (adapter, barrier) = block_first_adapter();
+        setup_with_adapter(adapter.clone());
+
+        send(opts("blocker"), None, Box::new(|_| {}));
+        send_tagged(
+            opts("keep-1"),
+            None,
+            Box::new(|_| {}),
+            Some("keep".to_string()),
+        );
+        send_tagged(
+            opts("remove-1"),
+            None,
+            Box::new(|_| {}),
+            Some("remove".to_string()),
+        );
+        send_tagged(
+            opts("keep-2"),
+            None,
+            Box::new(|_| {}),
+            Some("keep".to_string()),
+        );
+
+        cancel_tagged("remove");
+        barrier.wait();
+
+        while is_busy() {
+            std::thread::yield_now();
+        }
+
+        let calls = adapter.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 3);
+        assert!(!calls.contains(&"remove-1".to_string()));
+    }
+
+    #[test]
+    fn pending_count_accuracy() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+        let (adapter, barrier) = block_first_adapter();
+        setup_with_adapter(adapter.clone());
+
+        send(opts("blocker"), None, Box::new(|_| {}));
+        for i in 0..5 {
+            send(opts(&i.to_string()), None, Box::new(|_| {}));
+        }
+
+        assert_eq!(pending_count(), 5);
+
+        barrier.wait();
+        while is_busy() {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn queue_position_finds_tag() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+        let (adapter, barrier) = block_first_adapter();
+        setup_with_adapter(adapter.clone());
+
+        send(opts("blocker"), None, Box::new(|_| {}));
+        send_tagged(opts("a"), None, Box::new(|_| {}), Some("alpha".to_string()));
+        send_tagged(opts("b"), None, Box::new(|_| {}), Some("beta".to_string()));
+        send_tagged(opts("c"), None, Box::new(|_| {}), Some("gamma".to_string()));
+
+        assert_eq!(queue_position("alpha"), Some(0));
+        assert_eq!(queue_position("beta"), Some(1));
+        assert_eq!(queue_position("gamma"), Some(2));
+        assert_eq!(queue_position("nonexistent"), None);
+
+        barrier.wait();
+        while is_busy() {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn thread_reply_no_session_uses_new_session() {
+        let _lock = acquire_queue_lock();
+        let opts_cell = Arc::new(std::sync::Mutex::new(None));
+        let opts_cell_clone = Arc::clone(&opts_cell);
+
+        setup_with_adapter(Arc::new(RecordingAdapter(opts_cell_clone)));
+        thread_reply(None, "hello", None, Box::new(|_| {}), None);
+
+        while is_busy() {
+            std::thread::yield_now();
+        }
+
+        let opts = opts_cell.lock().expect("lock").take().expect("opts");
+        assert!(matches!(opts.op, BackendOp::NewSession));
+    }
+
+    #[test]
+    fn inflight_stream_accumulation() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+
+        append_inflight_stream("hello ");
+        append_inflight_stream("world");
+        assert_eq!(inflight_stream(), "hello world");
+
+        cancel_all();
+    }
+
+    #[test]
+    fn concurrent_enqueue_no_deadlock() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let responses: Vec<BackendResult> = (0..10)
+            .map(|_| BackendResult {
+                text: String::new(),
+                session_id: String::new(),
+                error: None,
+            })
+            .collect();
+        setup_with_adapter(Arc::new(MockAdapter::new(responses)));
+
+        let barrier = Arc::new(std::sync::Barrier::new(10));
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                let completed = Arc::clone(&completed);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    send(
+                        BackendOpts {
+                            op: BackendOp::NewSession,
+                            prompt: format!("thread-{i}"),
+                            ask_mode: false,
+                            stream: false,
+                            json_schema: None,
+                        },
+                        None,
+                        Box::new(move |_| {
+                            completed.fetch_add(1, Ordering::SeqCst);
+                        }),
+                    );
+                })
+            })
+            .collect();
+
+        let enqueue_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let enqueue_started = std::time::Instant::now();
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+        assert!(
+            enqueue_started.elapsed() < std::time::Duration::from_secs(10),
+            "enqueue threads should finish within timeout"
+        );
+
+        while is_busy() {
+            assert!(
+                std::time::Instant::now() < enqueue_deadline,
+                "queue should drain within timeout"
+            );
+            std::thread::yield_now();
+        }
+
+        assert_eq!(completed.load(Ordering::SeqCst), 10);
+    }
+
+    struct SlowAdapter {
+        started: Arc<std::sync::Barrier>,
+        gate: Arc<std::sync::Barrier>,
+    }
+
+    impl Adapter for SlowAdapter {
+        fn execute(&self, _opts: BackendOpts, _: Option<OnStream>, callback: OnComplete) {
+            let started = Arc::clone(&self.started);
+            let gate = Arc::clone(&self.gate);
+            std::thread::spawn(move || {
+                started.wait();
+                gate.wait();
+                (callback)(BackendResult {
+                    text: "slow-done".to_string(),
+                    session_id: String::new(),
+                    error: None,
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn cancel_all_during_processing_no_panic() {
+        let _lock = acquire_queue_lock();
+        cancel_all();
+
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        setup_with_adapter(Arc::new(SlowAdapter {
+            started: Arc::clone(&started),
+            gate: Arc::clone(&gate),
+        }));
+
+        let slow_result = Arc::new(std::sync::Mutex::new(None::<String>));
+        let sr = Arc::clone(&slow_result);
+        send(
+            opts("slow"),
+            None,
+            Box::new(move |res| {
+                *sr.lock().expect("lock") = Some(res.text.clone());
+            }),
+        );
+
+        started.wait();
+        cancel_all();
+        gate.wait();
+
+        while is_busy() {
+            std::thread::yield_now();
+        }
+
+        assert!(
+            slow_result.lock().expect("lock").is_none(),
+            "cancelled callback should not have fired"
+        );
+
+        let recovery_done = Arc::new(AtomicBool::new(false));
+        let rd = Arc::clone(&recovery_done);
+        let started2 = Arc::new(std::sync::Barrier::new(2));
+        let gate2 = Arc::new(std::sync::Barrier::new(2));
+        setup_with_adapter(Arc::new(SlowAdapter {
+            started: Arc::clone(&started2),
+            gate: Arc::clone(&gate2),
+        }));
+
+        send(
+            opts("recovery"),
+            None,
+            Box::new(move |_| {
+                rd.store(true, Ordering::SeqCst);
+            }),
+        );
+
+        started2.wait();
+        gate2.wait();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !recovery_done.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recovery item should complete"
+            );
+            std::thread::yield_now();
+        }
     }
 }

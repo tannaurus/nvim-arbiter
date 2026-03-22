@@ -1,0 +1,17 @@
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,4 @@
+-pub mod old;
++pub mod new;
+ pub mod utils;
+ 
+ use std::io;
+@@ -20,6 +20,7 @@
+ fn process() {
+     let x = 1;
+     let y = 2;
++    let z = x + y;
+     println!("{}", x + y);
+ }
+ 

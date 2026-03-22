@@ -111,15 +111,10 @@ pub fn save_review(state_dir: &Path, ws_hash: &str, ref_name: &str, state: &Revi
     let path = dir.join(format!("{ref_safe}.json"));
     let mut versioned = state.clone();
     versioned.version = CACHE_VERSION.to_string();
-    if let Err(e) = fs::write(
-        &path,
-        serde_json::to_string_pretty(&versioned).unwrap_or_default(),
-    ) {
-        eprintln!(
-            "[arbiter] failed to save review state to {}: {e}",
-            path.display()
-        );
-    }
+    let Ok(json) = serde_json::to_string_pretty(&versioned) else {
+        return;
+    };
+    let _ = fs::write(&path, json);
 }
 
 /// Loads threads from disk. Returns empty vec if file does not exist,
@@ -151,15 +146,10 @@ pub fn save_threads(state_dir: &Path, ws_hash: &str, ref_name: &str, threads: &[
         version: CACHE_VERSION.to_string(),
         threads: threads.to_vec(),
     };
-    if let Err(e) = fs::write(
-        &path,
-        serde_json::to_string_pretty(&file).unwrap_or_default(),
-    ) {
-        eprintln!(
-            "[arbiter] failed to save threads to {}: {e}",
-            path.display()
-        );
-    }
+    let Ok(json) = serde_json::to_string_pretty(&file) else {
+        return;
+    };
+    let _ = fs::write(&path, json);
 }
 
 /// Loads session records from disk. Returns empty vec if file does not exist or is corrupt.
@@ -171,32 +161,6 @@ pub fn load_sessions(state_dir: &Path, ws_hash: &str) -> Vec<SessionRecord> {
     };
     let file: SessionsFile = serde_json::from_slice(&bytes).unwrap_or_default();
     file.sessions
-}
-
-/// Saves session records to disk. Creates directories as needed.
-pub fn save_sessions(state_dir: &Path, ws_hash: &str, sessions: &[SessionRecord]) {
-    let dir = state_dir.join(ws_hash);
-    ensure_dir(&dir);
-    let path = dir.join("sessions.json");
-    let file = SessionsFile {
-        sessions: sessions.to_vec(),
-    };
-    if let Err(e) = fs::write(
-        &path,
-        serde_json::to_string_pretty(&file).unwrap_or_default(),
-    ) {
-        eprintln!(
-            "[arbiter] failed to save sessions to {}: {e}",
-            path.display()
-        );
-    }
-}
-
-/// Appends a session record to the persisted list and saves.
-pub fn add_session(state_dir: &Path, ws_hash: &str, record: SessionRecord) {
-    let mut sessions = load_sessions(state_dir, ws_hash);
-    sessions.push(record);
-    save_sessions(state_dir, ws_hash, &sessions);
 }
 
 /// SHA256 of the workspace path, truncated to 12 hex chars.
@@ -369,23 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn save_load_sessions_roundtrip() {
-        let tmp = TempDir::new().unwrap();
-        let dir = tmp.path();
-        let ws = workspace_hash(dir);
-        let rec = SessionRecord {
-            session_id: "sess-1".to_string(),
-            created_at: 1710000000,
-            last_prompt_preview: "fix the bug".to_string(),
-            thread_id: Some("t-1".to_string()),
-        };
-        save_sessions(dir, &ws, &[rec.clone()]);
-        let loaded = load_sessions(dir, &ws);
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].session_id, "sess-1");
-    }
-
-    #[test]
     fn save_review_stamps_current_version() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -424,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn load_review_empty_string_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("main.json"), "").unwrap();
+        let loaded = load_review(dir, &ws, "main");
+        assert!(loaded.files.is_empty());
+    }
+
+    #[test]
     fn load_threads_corrupt_json_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -432,6 +391,25 @@ mod tests {
         fs::create_dir_all(&ref_dir).unwrap();
         fs::write(ref_dir.join("main_threads.json"), "not json").unwrap();
         let loaded = load_threads(dir, &ws, "main");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_sessions_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let loaded = load_sessions(tmp.path(), "nonexistent");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_sessions_corrupt_json() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let ws = workspace_hash(dir);
+        let ref_dir = dir.join(&ws);
+        fs::create_dir_all(&ref_dir).unwrap();
+        fs::write(ref_dir.join("sessions.json"), "not valid json!!").unwrap();
+        let loaded = load_sessions(dir, &ws);
         assert!(loaded.is_empty());
     }
 
@@ -462,38 +440,66 @@ mod tests {
 
         let sanitized = sanitize_ref("feature/foo");
         assert_eq!(sanitized, "feature_foo");
-        let file_exists = dir.join(&ws).join("feature_foo.json").exists();
-        assert!(file_exists, "file should use sanitized ref name");
+        assert!(dir.join(&ws).join("feature_foo.json").exists());
     }
 
     #[test]
-    fn add_session_appends() {
+    fn sanitize_ref_collision() {
+        assert_eq!(sanitize_ref("a/b"), sanitize_ref("a_b"));
+
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
         let ws = workspace_hash(dir);
-        add_session(
-            dir,
-            &ws,
-            SessionRecord {
-                session_id: "s1".to_string(),
-                created_at: 1,
-                last_prompt_preview: "a".to_string(),
-                thread_id: None,
+
+        let state1 = ReviewState {
+            files: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "first.rs".to_string(),
+                    FileState {
+                        status: ReviewStatus::Approved,
+                        content_hash: "aaa".to_string(),
+                        updated_at: 1,
+                        accepted_hunks: Vec::new(),
+                    },
+                );
+                m
             },
-        );
-        add_session(
-            dir,
-            &ws,
-            SessionRecord {
-                session_id: "s2".to_string(),
-                created_at: 2,
-                last_prompt_preview: "b".to_string(),
-                thread_id: None,
+            ..Default::default()
+        };
+        save_review(dir, &ws, "a/b", &state1);
+
+        let state2 = ReviewState {
+            files: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "second.rs".to_string(),
+                    FileState {
+                        status: ReviewStatus::Approved,
+                        content_hash: "bbb".to_string(),
+                        updated_at: 2,
+                        accepted_hunks: Vec::new(),
+                    },
+                );
+                m
             },
-        );
-        let loaded = load_sessions(dir, &ws);
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded[0].session_id, "s1");
-        assert_eq!(loaded[1].session_id, "s2");
+            ..Default::default()
+        };
+        save_review(dir, &ws, "a_b", &state2);
+
+        let loaded = load_review(dir, &ws, "a/b");
+        assert!(loaded.files.contains_key("second.rs"));
+        assert!(!loaded.files.contains_key("first.rs"));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn content_hash_deterministic_prop(input in ".*") {
+            let a = content_hash(&input);
+            let b = content_hash(&input);
+            prop_assert_eq!(a, b);
+        }
     }
 }

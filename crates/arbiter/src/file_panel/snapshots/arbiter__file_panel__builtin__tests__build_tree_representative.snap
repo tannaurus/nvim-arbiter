@@ -1,0 +1,21 @@
+---
+source: crates/arbiter/src/file_panel/builtin.rs
+assertion_line: 583
+expression: output
+---
+✓ Cargo.toml [✓]
+· README.md
+▾ scripts/
+  + deploy.sh
+▾ src/
+  ▾ api/
+    · handler.rs [1T]
+    · routes.rs
+  ✗ config.rs [2T] [✗]
+  ▾ db/
+    ✓ connection.rs [✓]
+  ✓ lib.rs [✓]
+▾ tests/
+  · integration.rs
+
+── 9 files │ ✓ 3 │ ✗ 1 │ · 5 ──

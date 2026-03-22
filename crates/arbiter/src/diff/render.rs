@@ -12,6 +12,53 @@ use std::collections::{HashMap, HashSet};
 use super::parse::{self, Hunk};
 use crate::types::ThreadSummary;
 
+fn filetype_for_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" => "javascript",
+        "py" => "python",
+        "go" => "go",
+        "lua" => "lua",
+        "rb" => "ruby",
+        "sh" | "bash" | "zsh" => "sh",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "java" => "java",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "toml" => "toml",
+        "md" => "markdown",
+        "html" => "html",
+        "css" => "css",
+        "sql" => "sql",
+        "swift" => "swift",
+        "kt" | "kts" => "kotlin",
+        "ex" | "exs" => "elixir",
+        "zig" => "zig",
+        _ => "",
+    }
+}
+
+/// Strips the single-character diff prefix (`+`, `-`, or ` `) from a line,
+/// leaving hunk headers (`@@`) and file markers (`---`/`+++`) intact.
+fn strip_diff_prefix(line: &str) -> String {
+    if line.starts_with("@@")
+        || line.starts_with("---")
+        || line.starts_with("+++")
+        || line.is_empty()
+    {
+        return line.to_string();
+    }
+    let first = line.as_bytes().first().copied().unwrap_or(0);
+    if first == b'+' || first == b'-' || first == b' ' {
+        line[1..].to_string()
+    } else {
+        line.to_string()
+    }
+}
+
 fn set_buffer_lines(buf: &mut Buffer, lines: &[String]) -> nvim_oxi::Result<()> {
     let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
     api::set_option_value(
@@ -46,7 +93,7 @@ pub(crate) fn render(
     show_resolved: bool,
     new_hunk_buf_starts: Option<&HashSet<usize>>,
     accepted_hashes: &HashSet<String>,
-) -> nvim_oxi::Result<(Vec<Hunk>, HashMap<String, usize>)> {
+) -> nvim_oxi::Result<(Vec<Hunk>, HashMap<String, usize>, Vec<String>)> {
     let hunks = parse::parse_hunks(diff_text);
     let diff_lines: Vec<String> = diff_text.lines().map(|s| s.to_string()).collect();
 
@@ -57,7 +104,7 @@ pub(crate) fn render(
         .collect();
 
     let mut all_lines: Vec<String> = Vec::with_capacity(1 + visible.len() + diff_lines.len());
-    all_lines.push(header.clone());
+    all_lines.push(header);
     let mut thread_buf_lines = HashMap::new();
     for (i, s) in visible.iter().enumerate() {
         let summary_line = format!(
@@ -117,10 +164,40 @@ pub(crate) fn render(
             }
         }
     } else {
-        all_lines.extend(diff_lines.clone());
+        all_lines.extend(diff_lines);
     }
 
-    set_buffer_lines(buf, &all_lines)?;
+    let style = config::get().review.diff_style;
+
+    if style == DiffStyle::Signs {
+        let display_lines: Vec<String> = all_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                if i >= base_offset {
+                    strip_diff_prefix(line)
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
+        set_buffer_lines(buf, &display_lines)?;
+
+        let ft = filetype_for_path(file_path);
+        if !ft.is_empty() {
+            let buf_nr = buf.handle();
+            let _ = api::command(&format!(
+                "lua pcall(vim.treesitter.stop, {buf_nr}); vim.bo[{buf_nr}].filetype = '{ft}'"
+            ));
+        }
+    } else {
+        set_buffer_lines(buf, &all_lines)?;
+        let _ = api::set_option_value(
+            "filetype",
+            "diff",
+            &OptionOpts::builder().buffer(buf.clone()).build(),
+        );
+    }
 
     let accepted_buf_starts: HashSet<usize> = adjusted_hunks
         .iter()
@@ -137,7 +214,7 @@ pub(crate) fn render(
         &accepted_buf_starts,
     )?;
 
-    Ok((adjusted_hunks, thread_buf_lines))
+    Ok((adjusted_hunks, thread_buf_lines, all_lines))
 }
 
 /// Applies syntax highlighting to the diff buffer.
@@ -348,32 +425,7 @@ pub(crate) fn open_side_by_side(
     )?;
     right.set_name(format!("[working] {file_path}"))?;
 
-    let ext = file_path.rsplit('.').next().unwrap_or("");
-    let ft = match ext {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "py" => "python",
-        "go" => "go",
-        "lua" => "lua",
-        "rb" => "ruby",
-        "sh" | "bash" | "zsh" => "sh",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
-        "java" => "java",
-        "json" => "json",
-        "yaml" | "yml" => "yaml",
-        "toml" => "toml",
-        "md" => "markdown",
-        "html" => "html",
-        "css" => "css",
-        "sql" => "sql",
-        "swift" => "swift",
-        "kt" | "kts" => "kotlin",
-        "ex" | "exs" => "elixir",
-        "zig" => "zig",
-        _ => "",
-    };
+    let ft = filetype_for_path(file_path);
     if !ft.is_empty() {
         let _ = api::set_option_value(
             "filetype",
@@ -486,4 +538,102 @@ pub(crate) fn set_hunk_folds(
 pub(crate) fn win_exec(wid: i32, cmd: &str) {
     let escaped = cmd.replace('\'', "''");
     let _ = api::command(&format!("call win_execute({wid}, '{escaped}')"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filetype_for_known_extensions() {
+        assert_eq!(filetype_for_path("src/main.rs"), "rust");
+        assert_eq!(filetype_for_path("app.tsx"), "typescript");
+        assert_eq!(filetype_for_path("lib.py"), "python");
+        assert_eq!(filetype_for_path("go.mod"), "");
+        assert_eq!(filetype_for_path("README.md"), "markdown");
+        assert_eq!(filetype_for_path("config.yaml"), "yaml");
+        assert_eq!(filetype_for_path("config.yml"), "yaml");
+        assert_eq!(filetype_for_path("Makefile"), "");
+        assert_eq!(filetype_for_path("script.sh"), "sh");
+        assert_eq!(filetype_for_path("script.zsh"), "sh");
+        assert_eq!(filetype_for_path("main.go"), "go");
+        assert_eq!(filetype_for_path("file.toml"), "toml");
+        assert_eq!(filetype_for_path("file.json"), "json");
+        assert_eq!(filetype_for_path("file.html"), "html");
+        assert_eq!(filetype_for_path("file.css"), "css");
+        assert_eq!(filetype_for_path("file.java"), "java");
+        assert_eq!(filetype_for_path("file.swift"), "swift");
+        assert_eq!(filetype_for_path("file.zig"), "zig");
+    }
+
+    #[test]
+    fn filetype_for_dotfiles_and_no_extension() {
+        assert_eq!(filetype_for_path(".gitignore"), "");
+        assert_eq!(filetype_for_path("Dockerfile"), "");
+        assert_eq!(filetype_for_path(""), "");
+    }
+
+    #[test]
+    fn filetype_for_deep_paths() {
+        assert_eq!(filetype_for_path("a/b/c/d.rs"), "rust");
+        assert_eq!(filetype_for_path("src/components/Button.tsx"), "typescript");
+    }
+
+    #[test]
+    fn strip_diff_prefix_additions() {
+        assert_eq!(strip_diff_prefix("+added line"), "added line");
+        assert_eq!(strip_diff_prefix("+"), "");
+    }
+
+    #[test]
+    fn strip_diff_prefix_deletions() {
+        assert_eq!(strip_diff_prefix("-removed line"), "removed line");
+        assert_eq!(strip_diff_prefix("-"), "");
+    }
+
+    #[test]
+    fn strip_diff_prefix_context() {
+        assert_eq!(strip_diff_prefix(" context line"), "context line");
+        assert_eq!(strip_diff_prefix(" "), "");
+    }
+
+    #[test]
+    fn strip_diff_prefix_preserves_hunk_headers() {
+        assert_eq!(
+            strip_diff_prefix("@@ -1,3 +1,4 @@ fn main"),
+            "@@ -1,3 +1,4 @@ fn main"
+        );
+    }
+
+    #[test]
+    fn strip_diff_prefix_preserves_file_markers() {
+        assert_eq!(strip_diff_prefix("--- a/foo.rs"), "--- a/foo.rs");
+        assert_eq!(strip_diff_prefix("+++ b/foo.rs"), "+++ b/foo.rs");
+        assert_eq!(strip_diff_prefix("--- /dev/null"), "--- /dev/null");
+        assert_eq!(strip_diff_prefix("+++ /dev/null"), "+++ /dev/null");
+    }
+
+    #[test]
+    fn strip_diff_prefix_preserves_empty_lines() {
+        assert_eq!(strip_diff_prefix(""), "");
+    }
+
+    #[test]
+    fn strip_diff_prefix_preserves_non_diff_content() {
+        assert_eq!(
+            strip_diff_prefix("diff --git a/f b/f"),
+            "diff --git a/f b/f"
+        );
+        assert_eq!(
+            strip_diff_prefix("index abc..def 100644"),
+            "index abc..def 100644"
+        );
+    }
+
+    #[test]
+    fn strip_diff_prefix_content_with_markers() {
+        assert_eq!(strip_diff_prefix("+- list item"), "- list item");
+        assert_eq!(strip_diff_prefix(" - list item"), "- list item");
+        assert_eq!(strip_diff_prefix("++ heading"), "+ heading");
+    }
 }

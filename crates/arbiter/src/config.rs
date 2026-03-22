@@ -49,6 +49,11 @@ pub(crate) struct Config {
     /// Any field left unset auto-detects: Nerd Font glyphs if
     /// nvim-web-devicons is installed, Unicode otherwise.
     pub icons: IconConfig,
+    /// Additional directories to search for project rule files.
+    /// Searched after the default locations (`~/.config/arbiter/rules/`
+    /// and `.arbiter/rules/` in the workspace). Later sources win
+    /// when rule descriptions conflict.
+    pub rules_dirs: Vec<String>,
 }
 
 impl Default for Config {
@@ -69,6 +74,7 @@ impl Default for Config {
             extra_args: Vec::new(),
             workspaces: HashMap::new(),
             icons: IconConfig::default(),
+            rules_dirs: Vec::new(),
         }
     }
 }
@@ -449,7 +455,9 @@ impl Config {
                     .and_then(|p| p.to_str().map(String::from));
                 let resolved = key_canon.as_deref().unwrap_or(&expanded);
 
-                if cwd_canon.starts_with(resolved) && resolved.len() > best_literal_len {
+                let is_prefix =
+                    std::path::Path::new(cwd_canon).starts_with(std::path::Path::new(resolved));
+                if is_prefix && resolved.len() > best_literal_len {
                     best_literal_len = resolved.len();
                     best_literal = Some(ws_override);
                 }
@@ -500,4 +508,291 @@ pub(crate) fn get() -> &'static Config {
     CONFIG
         .get()
         .unwrap_or_else(|| DEFAULT.get_or_init(Config::default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn val(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
+    #[test]
+    fn split_cmd_top() {
+        assert_eq!(PanelPosition::Top.split_cmd(20), "topleft 20split");
+    }
+
+    #[test]
+    fn split_cmd_bottom() {
+        assert_eq!(PanelPosition::Bottom.split_cmd(30), "botright 30split");
+    }
+
+    #[test]
+    fn split_cmd_left() {
+        assert_eq!(
+            PanelPosition::Left.split_cmd(40),
+            "topleft vertical 40split"
+        );
+    }
+
+    #[test]
+    fn split_cmd_right() {
+        assert_eq!(
+            PanelPosition::Right.split_cmd(60),
+            "botright vertical 60split"
+        );
+    }
+
+    #[test]
+    fn split_cmd_clamps_small_size_to_five() {
+        assert_eq!(PanelPosition::Top.split_cmd(3), "topleft 5split");
+        assert_eq!(PanelPosition::Top.split_cmd(0), "topleft 5split");
+        assert_eq!(PanelPosition::Top.split_cmd(4), "topleft 5split");
+        assert_eq!(PanelPosition::Top.split_cmd(5), "topleft 5split");
+        assert_eq!(PanelPosition::Top.split_cmd(6), "topleft 6split");
+    }
+
+    #[test]
+    fn is_vertical_left_right() {
+        assert!(PanelPosition::Left.is_vertical());
+        assert!(PanelPosition::Right.is_vertical());
+    }
+
+    #[test]
+    fn is_vertical_top_bottom() {
+        assert!(!PanelPosition::Top.is_vertical());
+        assert!(!PanelPosition::Bottom.is_vertical());
+    }
+
+    #[test]
+    fn backend_kind_deser_lowercase() {
+        assert_eq!(
+            serde_json::from_value::<BackendKind>(val("cursor")).unwrap(),
+            BackendKind::Cursor
+        );
+        assert_eq!(
+            serde_json::from_value::<BackendKind>(val("claude")).unwrap(),
+            BackendKind::Claude
+        );
+    }
+
+    #[test]
+    fn backend_kind_deser_case_insensitive() {
+        assert_eq!(
+            serde_json::from_value::<BackendKind>(val("CURSOR")).unwrap(),
+            BackendKind::Cursor
+        );
+        assert_eq!(
+            serde_json::from_value::<BackendKind>(val("Claude")).unwrap(),
+            BackendKind::Claude
+        );
+    }
+
+    #[test]
+    fn backend_kind_deser_invalid() {
+        assert!(serde_json::from_value::<BackendKind>(val("openai")).is_err());
+    }
+
+    #[test]
+    fn file_panel_kind_deser_builtin() {
+        assert_eq!(
+            serde_json::from_value::<FilePanelKind>(val("builtin")).unwrap(),
+            FilePanelKind::Builtin
+        );
+    }
+
+    #[test]
+    fn file_panel_kind_deser_nvim_tree_variants() {
+        for input in &["nvim-tree", "nvim_tree", "nvimtree"] {
+            assert_eq!(
+                serde_json::from_value::<FilePanelKind>(val(input)).unwrap(),
+                FilePanelKind::NvimTree,
+                "expected NvimTree for input '{input}'"
+            );
+        }
+    }
+
+    #[test]
+    fn file_panel_kind_deser_invalid() {
+        assert!(serde_json::from_value::<FilePanelKind>(val("neo-tree")).is_err());
+    }
+
+    #[test]
+    fn diff_style_deser_lowercase() {
+        assert_eq!(
+            serde_json::from_value::<DiffStyle>(val("full")).unwrap(),
+            DiffStyle::Full
+        );
+        assert_eq!(
+            serde_json::from_value::<DiffStyle>(val("signs")).unwrap(),
+            DiffStyle::Signs
+        );
+    }
+
+    #[test]
+    fn diff_style_deser_case_insensitive() {
+        assert_eq!(
+            serde_json::from_value::<DiffStyle>(val("Full")).unwrap(),
+            DiffStyle::Full
+        );
+        assert_eq!(
+            serde_json::from_value::<DiffStyle>(val("SIGNS")).unwrap(),
+            DiffStyle::Signs
+        );
+    }
+
+    #[test]
+    fn diff_style_deser_invalid() {
+        assert!(serde_json::from_value::<DiffStyle>(val("inline")).is_err());
+    }
+
+    #[test]
+    fn panel_position_deser_all_variants() {
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("top")).unwrap(),
+            PanelPosition::Top
+        );
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("bottom")).unwrap(),
+            PanelPosition::Bottom
+        );
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("left")).unwrap(),
+            PanelPosition::Left
+        );
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("right")).unwrap(),
+            PanelPosition::Right
+        );
+    }
+
+    #[test]
+    fn panel_position_deser_case_insensitive() {
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("RIGHT")).unwrap(),
+            PanelPosition::Right
+        );
+        assert_eq!(
+            serde_json::from_value::<PanelPosition>(val("Top")).unwrap(),
+            PanelPosition::Top
+        );
+    }
+
+    #[test]
+    fn panel_position_deser_invalid() {
+        assert!(serde_json::from_value::<PanelPosition>(val("center")).is_err());
+    }
+
+    fn test_config(default_ref: Option<&str>, workspaces: Vec<(&str, Option<&str>)>) -> Config {
+        let mut ws = HashMap::new();
+        for (key, dref) in workspaces {
+            ws.insert(
+                key.to_string(),
+                WorkspaceOverride {
+                    default_ref: dref.map(|s| s.to_string()),
+                },
+            );
+        }
+        Config {
+            review: ReviewConfig {
+                default_ref: default_ref.map(|s| s.to_string()),
+                ..ReviewConfig::default()
+            },
+            workspaces: ws,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn default_ref_for_falls_back_to_review_default() {
+        let cfg = test_config(Some("main"), vec![]);
+        assert_eq!(cfg.default_ref_for("/some/path"), Some("main"));
+    }
+
+    #[test]
+    fn default_ref_for_literal_path_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let cfg = test_config(Some("main"), vec![(path_str, Some("develop"))]);
+        assert_eq!(cfg.default_ref_for(path_str), Some("develop"));
+    }
+
+    #[test]
+    fn default_ref_for_literal_prefix_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let parent_str = path.to_str().unwrap();
+        let child = path.join("sub/project");
+        std::fs::create_dir_all(&child).unwrap();
+        let child_str = child.to_str().unwrap();
+
+        let cfg = test_config(Some("main"), vec![(parent_str, Some("develop"))]);
+        assert_eq!(cfg.default_ref_for(child_str), Some("develop"));
+    }
+
+    #[test]
+    fn default_ref_for_regex_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let cfg = test_config(Some("main"), vec![(".*", Some("trunk"))]);
+        assert_eq!(cfg.default_ref_for(path_str), Some("trunk"));
+    }
+
+    #[test]
+    fn default_ref_for_literal_beats_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let cfg = test_config(
+            Some("main"),
+            vec![(path_str, Some("develop")), (".*", Some("trunk"))],
+        );
+        assert_eq!(cfg.default_ref_for(path_str), Some("develop"));
+    }
+
+    #[test]
+    fn default_ref_for_workspace_override_with_no_ref_falls_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        let path_str = path.to_str().unwrap();
+
+        let cfg = test_config(Some("main"), vec![(path_str, None)]);
+        assert_eq!(cfg.default_ref_for(path_str), Some("main"));
+    }
+
+    #[test]
+    fn default_ref_for_empty_workspaces_no_default() {
+        let cfg = test_config(None, vec![]);
+        assert_eq!(cfg.default_ref_for("/some/path"), None);
+    }
+
+    #[test]
+    fn state_dir_custom() {
+        let cfg = Config {
+            review: ReviewConfig {
+                state_dir: Some("/tmp/arbiter-test-state".to_string()),
+                ..ReviewConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.state_dir(),
+            std::path::PathBuf::from("/tmp/arbiter-test-state")
+        );
+    }
+
+    #[test]
+    fn state_dir_default() {
+        let cfg = Config::default();
+        let home = std::env::var("HOME").unwrap_or("/tmp".to_string());
+        let expected = std::path::PathBuf::from(home).join(".local/share/nvim/arbiter");
+        assert_eq!(cfg.state_dir(), expected);
+    }
 }

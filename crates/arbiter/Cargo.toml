@@ -15,6 +15,10 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 regex = "1.12.3"
 chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+glob = "0.3.3"
+toml = "1.0.7"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
+insta = "1"

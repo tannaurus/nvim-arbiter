@@ -74,6 +74,8 @@ pub(crate) fn setup() -> nvim_oxi::Result<()> {
         ("ArbiterRuleLearned", "DiagnosticOk"),
         ("ArbiterRevisionSummary", "DiagnosticInfo"),
         ("ArbiterRevisionFile", "NonText"),
+        ("ArbiterSimilarHeader", "DiagnosticHint"),
+        ("ArbiterSimilarRef", "NonText"),
     ];
     for (name, link_to) in linked {
         let _ = api::command(&format!("highlight default link {name} {link_to}"));

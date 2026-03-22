@@ -22,15 +22,20 @@ pub(crate) fn snapshot_files(cwd: &str, paths: &[String]) -> HashMap<String, Opt
         .collect()
 }
 
-/// Runs `git diff --name-only` synchronously to detect files the agent may
-/// have created or modified that weren't in the original file list.
+/// Runs `git diff --name-only HEAD` synchronously to detect files the agent
+/// may have created or modified that weren't in the original file list.
+///
+/// Uses HEAD when ref_name is empty (working tree mode) to stay consistent
+/// with the main diff pipeline.
 ///
 /// Returns relative paths. Fast enough to call from a callback (<50ms).
 pub(crate) fn diff_names_sync(cwd: &str, ref_name: &str) -> Vec<String> {
-    let mut args = vec!["diff", "--name-only"];
-    if !ref_name.is_empty() {
-        args.push(ref_name);
-    }
+    let effective_ref = if ref_name.is_empty() {
+        "HEAD"
+    } else {
+        ref_name
+    };
+    let args = vec!["diff", "--name-only", &effective_ref];
     let output = match std::process::Command::new("git")
         .args(&args)
         .current_dir(cwd)
@@ -139,7 +144,7 @@ pub(crate) fn generate_unified_diff(
     out.push_str(&format!("--- {old_name}\n"));
     out.push_str(&format!("+++ {new_name}\n"));
 
-    let hunks = group_into_hunks(&ops, old_lines.len(), new_lines.len());
+    let hunks = group_into_hunks(&ops);
     if hunks.is_empty() {
         return String::new();
     }
@@ -242,7 +247,7 @@ fn lcs_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<DiffOp<'a>> {
     ops
 }
 
-fn group_into_hunks<'a>(ops: &[DiffOp<'a>], _old_len: usize, _new_len: usize) -> Vec<DiffHunk<'a>> {
+fn group_into_hunks<'a>(ops: &[DiffOp<'a>]) -> Vec<DiffHunk<'a>> {
     let context_lines = 3;
     let mut hunks: Vec<DiffHunk<'a>> = Vec::new();
 
@@ -366,6 +371,19 @@ mod tests {
     }
 
     #[test]
+    fn generate_unified_diff_roundtrip_parseable() {
+        let before = "fn main() {\n    println!(\"hello\");\n}\n";
+        let after = "fn main() {\n    println!(\"world\");\n    return;\n}\n";
+        let diff = generate_unified_diff("test.rs", Some(before), Some(after));
+
+        assert!(!diff.is_empty());
+        let hunks = crate::diff::parse_hunks(&diff);
+        assert!(!hunks.is_empty());
+        assert!(hunks[0].old_start >= 1);
+        assert!(hunks[0].new_start >= 1);
+    }
+
+    #[test]
     fn build_revision_no_changes() {
         let thread = crate::threads::create("f.rs", 1, "hi", crate::threads::CreateOpts::default());
         let snap: HashMap<String, Option<String>> =
@@ -396,6 +414,35 @@ mod tests {
     }
 
     #[test]
+    fn build_revision_index_continuity() {
+        let mut thread =
+            crate::threads::create("f.rs", 1, "hi", crate::threads::CreateOpts::default());
+        thread.revisions.push(Revision {
+            index: 1,
+            ts: 100,
+            message_index: 1,
+            files: vec![],
+        });
+        thread.revisions.push(Revision {
+            index: 2,
+            ts: 200,
+            message_index: 2,
+            files: vec![],
+        });
+
+        let before: HashMap<String, Option<String>> =
+            [("f.rs".to_string(), Some("old".to_string()))]
+                .into_iter()
+                .collect();
+        let after: HashMap<String, Option<String>> =
+            [("f.rs".to_string(), Some("new".to_string()))]
+                .into_iter()
+                .collect();
+        let rev = build_revision(&thread, &before, &after, &[], 3).unwrap();
+        assert_eq!(rev.index, 3);
+    }
+
+    #[test]
     fn build_revision_detects_new_files() {
         let thread = crate::threads::create("f.rs", 1, "hi", crate::threads::CreateOpts::default());
         let before: HashMap<String, Option<String>> = HashMap::new();
@@ -407,6 +454,21 @@ mod tests {
         assert_eq!(rev.files.len(), 1);
         assert_eq!(rev.files[0].path, "new.rs");
         assert!(rev.files[0].before.is_none());
+    }
+
+    #[test]
+    fn build_revision_file_deletion() {
+        let thread = crate::threads::create("f.rs", 1, "hi", crate::threads::CreateOpts::default());
+        let before: HashMap<String, Option<String>> =
+            [("f.rs".to_string(), Some("content".to_string()))]
+                .into_iter()
+                .collect();
+        let after: HashMap<String, Option<String>> =
+            [("f.rs".to_string(), None)].into_iter().collect();
+        let rev = build_revision(&thread, &before, &after, &[], 1).unwrap();
+        assert_eq!(rev.files.len(), 1);
+        assert_eq!(rev.files[0].before.as_deref(), Some("content"));
+        assert!(rev.files[0].after.is_none());
     }
 
     #[test]
@@ -443,5 +505,162 @@ mod tests {
         let (added, removed) = revision_file_stats(&rf);
         assert_eq!(added, 0);
         assert_eq!(removed, 2);
+    }
+
+    #[test]
+    fn revision_file_stats_empty_both() {
+        let rf = RevisionFile {
+            path: "f.rs".to_string(),
+            before: None,
+            after: None,
+        };
+        let (added, removed) = revision_file_stats(&rf);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn group_into_hunks_context_boundary() {
+        let old_lines = vec![
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o",
+        ];
+        let mut modified = old_lines.clone();
+        modified[0] = "A";
+        modified[14] = "O";
+
+        let ops = lcs_diff(&old_lines, &modified);
+        let hunks = group_into_hunks(&ops);
+
+        assert_eq!(hunks.len(), 2);
+        assert!(hunks[0].old_count > 0);
+        assert!(hunks[1].old_count > 0);
+    }
+
+    fn init_repo(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .expect("git config email");
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .expect("git config name");
+    }
+
+    fn commit_all(dir: &std::path::Path, msg: &str) {
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(["commit", "-m", msg])
+            .current_dir(dir)
+            .output()
+            .expect("git commit");
+    }
+
+    #[test]
+    fn diff_names_sync_empty_ref_uses_head() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "initial\n").expect("write");
+        commit_all(dir, "initial");
+
+        std::fs::write(dir.join("a.txt"), "modified\n").expect("write");
+
+        let names = diff_names_sync(dir.to_str().unwrap(), "");
+        assert!(names.contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn diff_names_sync_explicit_ref() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "v1\n").expect("write");
+        commit_all(dir, "v1");
+
+        std::fs::write(dir.join("a.txt"), "v2\n").expect("write");
+        commit_all(dir, "v2");
+
+        let names = diff_names_sync(dir.to_str().unwrap(), "HEAD~1");
+        assert!(names.contains(&"a.txt".to_string()));
+    }
+
+    #[test]
+    fn diff_names_sync_no_changes_returns_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        init_repo(dir);
+
+        std::fs::write(dir.join("a.txt"), "same\n").expect("write");
+        commit_all(dir, "initial");
+
+        let names = diff_names_sync(dir.to_str().unwrap(), "");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn snapshot_unified_diff_modification() {
+        let before = "\
+use std::io;
+
+fn main() {
+    let name = \"world\";
+    println!(\"hello {}\", name);
+    do_work();
+}
+
+fn do_work() {
+    println!(\"working...\");
+}
+";
+        let after = "\
+use std::io;
+use std::fmt;
+
+fn main() {
+    let name = \"universe\";
+    println!(\"hello {}\", name);
+    setup();
+    do_work();
+}
+
+fn do_work() {
+    println!(\"working hard...\");
+    cleanup();
+}
+";
+        let output = generate_unified_diff("src/main.rs", Some(before), Some(after));
+        insta::assert_snapshot!("unified_diff_modification", output);
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn generate_unified_diff_never_panics(
+            before in "[a-z\n]{0,50}",
+            after in "[a-z\n]{0,50}",
+        ) {
+            let diff = generate_unified_diff("test.rs", Some(&before), Some(&after));
+            if !diff.is_empty() {
+                let hunks = crate::diff::parse_hunks(&diff);
+                for hunk in &hunks {
+                    prop_assert!(hunk.buf_start <= hunk.buf_end);
+                }
+            }
+        }
     }
 }

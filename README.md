@@ -29,8 +29,11 @@ These are decisions made during or around the review. They'd rot in a skill file
 - **PR-style diffs** -- Dedicated tabpage with file panel and diff viewer. Diff against a branch via `git merge-base`, or diff unstaged working tree changes.
 - **Line-anchored threads** -- Comment on a diff line, get a streaming response. Threads persist across sessions.
 - **Review memory** -- Conventions you enforce get extracted and fed into future prompts automatically.
+- **Project rules** -- Persistent, file-aware instructions loaded from markdown files with TOML frontmatter. Scope rules to specific file types and scenarios so the agent gets the right context for every prompt. See [Project rules](#project-rules).
+- **Similar threads** -- After self-review, a similarity pass groups threads that flag the same class of issue. Cross-references appear in the thread panel so you can navigate related feedback.
 - **Progress tracking** -- Approve files, accept hunks, filter threads by status. In working tree mode, accepting hunks stages them in git. State saved to disk.
 - **Self-review** -- The agent reviews its own diff and flags concerns before you start.
+- **Prompt panel** -- Long-lived agent conversations in a floating window. Multiple named conversations maintain independent context across the review. `:ArbiterPrompt` opens the default conversation; `:ArbiterPrompt security review` opens a named one.
 - **Live diffs** -- Filesystem polling picks up the agent's changes without manual refresh.
 - **Auto-resolve** -- Simple feedback ("rename this") resolves itself once the agent applies the fix.
 - **Session persistence** -- Review state, threads, and conversations restored when you reopen. Stale caches from older plugin versions are automatically discarded.
@@ -67,6 +70,8 @@ For simple requests like "rename this variable" or "add a docstring here", use `
 ### Agent self-review
 
 Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus.
+
+To have the agent act on all its own feedback at once, run `:ArbiterApply`. This bundles every open self-review thread into a single prompt telling the agent to fix them all. Each thread is marked as auto-resolve, so they'll close automatically once the agent applies the changes.
 
 ### Catching up
 
@@ -224,6 +229,12 @@ require("arbiter").setup({
   -- Toggle at runtime with :ArbiterToggleRules. View/edit with :ArbiterRules.
   learn_rules = true,
 
+  -- Additional directories to search for project rule files.
+  -- Searched after the default locations (~/.config/arbiter/rules/ and
+  -- .arbiter/rules/ in the workspace). Later sources win when rule
+  -- descriptions conflict.
+  rules_dirs = {},
+
   review = {
     -- Default git ref for :ArbiterCompare (e.g. "main", "develop").
     -- The diff uses merge-base so only your branch's changes appear.
@@ -237,6 +248,15 @@ require("arbiter").setup({
     -- Automatically fold hunks that have been accepted via the accept_hunk
     -- keymap. Folded hunks are dimmed and collapsed in the diff panel.
     fold_approved = false,
+
+    -- Diff highlighting style:
+    --   "full"  - full-line background colors (green/red). Replaces syntax
+    --            highlighting with diff colors (GitHub PR style). Default.
+    --   "signs" - colored gutter signs only. Preserves the file's syntax
+    --            highlighting on the line content. Diff prefix characters
+    --            (+/-/space) are stripped from the buffer so treesitter
+    --            parses clean source code.
+    diff_style = "full",
 
     -- Seconds to wait before auto-resolve comments are marked resolved.
     -- Auto-resolve comments (sent via the auto_resolve keymap) are
@@ -362,6 +382,77 @@ If none of these resolve, `:ArbiterCompare` shows an error. Use `:Arbiter` for u
 
 You can also change the ref on the fly during an active review with `:ArbiterRef`.
 
+### Project rules
+
+Project rules are persistent instructions loaded from disk and injected into agent prompts. They complement learned rules (which are extracted from your review conversations and live only for the session) with durable, version-controllable guidance that applies across sessions and team members.
+
+Use project rules for things like:
+
+- Language or framework conventions that apply to specific file types
+- Architecture constraints scoped to certain directories
+- Review standards you want enforced during self-review but not in normal thread conversations
+
+#### File format
+
+Each rule is a `.md` file with TOML frontmatter:
+
+```markdown
+---
+description = "Rust error handling"
+match = ["**/*.rs"]
+scenarios = ["thread"]
+---
+Prefer map_err over match for error transformation.
+Use the ? operator for propagation. Avoid unwrap and expect.
+```
+
+**Frontmatter fields:**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `description` | yes | string | Human-readable name. Used for deduplication and display in `:ArbiterRules`. |
+| `match` | no | string or list | Glob patterns matched against the file path. Omit to match all files. Accepts a single string (`"*.rs"`) or a list (`["**/*.rs", "**/*.toml"]`). |
+| `scenarios` | no | list | When this rule applies: `"thread"` (comments and replies), `"self_review"` (`:ArbiterSelfReview`). Omit to apply in all scenarios. Unknown values are ignored. |
+
+The body (everything after the closing `---`) is the instruction text sent to the agent. It can be any length.
+
+#### Search directories
+
+Rules are loaded from three locations, in order:
+
+1. **Global** -- `~/.config/arbiter/rules/`
+2. **Workspace** -- `.arbiter/rules/` relative to the project root
+3. **Custom** -- any directories listed in the `rules_dirs` config option
+
+Only `.md` files are loaded. Subdirectories are not traversed. Malformed files are silently skipped.
+
+#### Precedence
+
+When two rules share the same `description`, the later source wins. This means a workspace rule overrides a global rule with the same name, and a custom directory overrides both. Use this to set team-wide defaults globally and override them per-project.
+
+#### Resolution
+
+When Arbiter builds a prompt, it resolves which rules apply based on two filters:
+
+1. **Scenario** -- if the rule specifies `scenarios`, it must include the current context (`thread` or `self_review`). Rules with no `scenarios` field apply everywhere.
+2. **File glob** -- if the rule specifies `match` patterns, at least one must match the file path. Rules with no `match` field apply to all files. During self-review (which operates on the whole diff, not a single file), glob-scoped rules are skipped since there is no single file to match against.
+
+Matched rules are formatted and prepended to the agent prompt as a "Project rules" block.
+
+#### Relationship to learned rules
+
+Learned rules (`learn_rules = true`) are extracted from your review conversations and accumulate during a session. They capture conventions you enforce in the moment, like "don't introduce callback-style code in this refactor." They reset when you close the review.
+
+Project rules are the opposite: written ahead of time, versioned in your repo, and applied consistently. The two systems work together. Project rules set the baseline; learned rules adapt to the current review.
+
+#### Commands
+
+| Command | Description |
+|---------|-------------|
+| `:ArbiterRules` | Open an editable popup showing all active rules (learned + project). `:w` saves, `q` closes. |
+| `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
+| `:ArbiterReloadRules` | Re-read project rule files from disk and report the count. Useful after adding or editing rule files without restarting the review. |
+
 ### Using nvim-tree
 
 Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, needs changes, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
@@ -418,15 +509,18 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 
 | Command | Description |
 |---------|-------------|
+| `:ArbiterPrompt [name]` | Toggle the prompt panel. Opens a floating conversation window. Without an argument, opens the default "main" conversation. With a name (may be multiple words), opens or switches to that named conversation. Each conversation maintains independent message history and backend session. |
 | `:ArbiterRef [branch]` | Change the comparison branch on the fly. No argument clears the base. |
 | `:ArbiterActiveThread` | Open the thread window for the agent that is currently thinking. |
 | `:ArbiterSelfReview` | Run agent self-review on the current diff. Creates agent threads. |
+| `:ArbiterApply` | Send all open self-review feedback to the agent in a single prompt. Marks each thread as auto-resolve so they close once the agent applies the changes. |
 | `:ArbiterRefresh` | Refresh the file list and current file diff. |
 | `:ArbiterOpenThread <file> <line>` | Open the thread at the given file and line number. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
 | `:ArbiterSummary` | Show review summary popup (file/thread counts). |
 | `:ArbiterRules` | Open an editable popup with the current review rules. `:w` saves, `q` closes. |
 | `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
+| `:ArbiterReloadRules` | Re-read project rule files from disk and report the count. |
 
 ## Keybindings
 
@@ -511,8 +605,17 @@ When a thread conversation is open:
 
 | Key | Action |
 |-----|--------|
-| `<CR>` | Reply to the thread (opens input float). |
+| `<CR>` | Reply to the thread (opens input split below the thread panel). |
 | `q` | Close the thread window. |
+
+### Prompt panel
+
+When the prompt panel is open (via `:ArbiterPrompt`):
+
+| Key | Action |
+|-----|--------|
+| `<CR>` | Open input to send a message. |
+| `q` | Close the prompt panel (conversation state is preserved). |
 
 ## Build from source
 
@@ -550,14 +653,18 @@ When the agent is processing a request, the component shows a spinner with elaps
 
 The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C API. Key modules:
 
-- `backend/` - CLI adapter shim (Cursor, Claude) with FIFO queue and streaming support
+- `backend/` - CLI adapter shim (Cursor, Claude) with FIFO queue, streaming support, and shared response parsing
 - `diff/` - Unified diff parser and buffer renderer
 - `threads/` - Thread CRUD, anchoring, re-anchoring, filtering, and thread panel
-- `review.rs` - Core review workbench state and UI orchestration
+- `review/` - Core review workbench: lifecycle, keymaps, navigation, hunk acceptance, thread UI, and revision view
+- `commands/` - User command registration and self-review orchestration
+- `prompt_panel.rs` - Long-lived prompt conversations in a floating window with named sessions
+- `panel.rs` - Shared rendering utilities (timestamps, streaming, status lines) used by thread and prompt panels
 - `dispatch.rs` - Safe cross-thread callback dispatch via `libuv::AsyncHandle`
 - `git.rs` - Async git operations (merge-base, diff, show, stash) and synchronous staging/unstaging
 - `state.rs` - JSON persistence of review state, threads, and sessions
 - `config.rs` - Configuration deserialization with per-workspace overrides
+- `rules.rs` - Scenario-scoped rule system with glob matching and TOML frontmatter
 - `file_panel/` - File panel trait and implementations (builtin tree, nvim-tree adapter)
 - `poll.rs` - Periodic file and file-list refresh via libuv timers
 - `activity.rs` - Backend busy/idle tracking for statusline display

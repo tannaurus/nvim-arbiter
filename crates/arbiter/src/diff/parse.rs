@@ -13,30 +13,30 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Hunk {
     /// First buffer line of this hunk (0-based).
-    pub buf_start: usize,
+    pub(crate) buf_start: usize,
     /// Last buffer line of this hunk (0-based).
-    pub buf_end: usize,
+    pub(crate) buf_end: usize,
     /// Start line in the old file (1-based).
-    pub old_start: usize,
+    pub(crate) old_start: usize,
     /// Number of lines in the old file.
-    pub old_count: usize,
+    pub(crate) old_count: usize,
     /// Start line in the new file (1-based).
-    pub new_start: usize,
+    pub(crate) new_start: usize,
     /// Number of lines in the new file.
-    pub new_count: usize,
+    pub(crate) new_count: usize,
     /// Raw header line (e.g. `@@ -1,3 +1,4 @@`).
-    pub header: String,
+    pub(crate) header: String,
     /// Hash of the hunk's content lines (excluding header).
-    pub content_hash: String,
+    pub(crate) content_hash: String,
 }
 
 /// Source file location for a buffer line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceLocation {
     /// File path (from diff header or caller).
-    pub file: String,
+    pub(crate) file: String,
     /// 1-based line number in the source file.
-    pub line: usize,
+    pub(crate) line: usize,
 }
 
 /// Computes a content hash for change detection.
@@ -99,10 +99,7 @@ pub(crate) fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
 }
 
 fn parse_hunk_header(header: &str, content: &[&str]) -> Option<Hunk> {
-    let inner = header
-        .trim_start_matches("@@ ")
-        .trim_end_matches(" @@")
-        .trim_end_matches(" @@");
+    let inner = header.trim_start_matches("@@ ").trim_end_matches(" @@");
     let parts: Vec<&str> = inner.split_whitespace().collect();
     if parts.len() < 2 {
         return None;
@@ -356,6 +353,41 @@ index abc..def 100644
     }
 
     #[test]
+    fn parse_hunks_whitespace_only_input() {
+        assert!(parse_hunks("   \n\n  \t\n").is_empty());
+    }
+
+    #[test]
+    fn parse_hunks_file_headers_no_hunks() {
+        let input = "diff --git a/f.rs b/f.rs\n--- a/f.rs\n+++ b/f.rs\n";
+        assert!(parse_hunks(input).is_empty());
+    }
+
+    #[test]
+    fn parse_hunks_invalid_hunk_header_skipped() {
+        let input = "\
+@@ invalid @@
++skipped
+@@ -1,1 +1,2 @@
+ ctx
++added
+";
+        let hunks = parse_hunks(input);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_start, 1);
+        assert_eq!(hunks[0].new_count, 2);
+    }
+
+    #[test]
+    fn parse_hunks_non_numeric_count_defaults_to_one() {
+        let diff = "@@ -1,not_a_number +1,2 @@\n ctx\n+added\n";
+        let hunks = parse_hunks(diff);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_count, 1);
+        assert_eq!(hunks[0].new_count, 2);
+    }
+
+    #[test]
     fn content_hash_deterministic() {
         let h1 = content_hash("foo");
         let h2 = content_hash("foo");
@@ -370,6 +402,13 @@ index abc..def 100644
     }
 
     #[test]
+    fn content_hash_empty_string() {
+        let h = content_hash("");
+        assert_eq!(h.len(), 12);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn synthesize_untracked_format() {
         let out = synthesize_untracked("line1\nline2\n", "src/foo.rs");
         assert!(out.starts_with("diff --git"));
@@ -381,6 +420,16 @@ index abc..def 100644
     fn synthesize_untracked_empty_file() {
         let out = synthesize_untracked("", "x");
         assert!(out.contains("@@ -0,0 +1,1 @@"));
+    }
+
+    #[test]
+    fn synthesize_untracked_no_trailing_newline() {
+        let out = synthesize_untracked("hello\nworld", "test.txt");
+        assert!(out.contains("+hello"));
+        assert!(out.contains("+world"));
+        let hunks = parse_hunks(&out);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].new_count, 2);
     }
 
     #[test]
@@ -468,6 +517,30 @@ index abc..def 100644
     }
 
     #[test]
+    fn buf_line_to_source_deletion_only_line() {
+        let diff = "\
+diff --git a/f.rs b/f.rs
+index 000..111 100644
+--- a/f.rs
++++ b/f.rs
+@@ -1,3 +1,1 @@
+-removed_a
+-removed_b
+ kept
+";
+        let hunks = parse_hunks(diff);
+        let lines: Vec<String> = diff.lines().map(String::from).collect();
+        let loc = buf_line_to_source(&hunks, 5, &lines, "f.rs");
+        assert_eq!(
+            loc,
+            Some(SourceLocation {
+                file: "f.rs".to_string(),
+                line: 1,
+            })
+        );
+    }
+
+    #[test]
     fn source_to_buf_line_finds_context() {
         let hunks = parse_hunks(SIMPLE_DIFF);
         let lines = simple_diff_all_lines();
@@ -481,6 +554,22 @@ index abc..def 100644
         let lines = simple_diff_all_lines();
         let result = source_to_buf_line(&hunks, 3, &lines);
         assert_eq!(result, Some(8));
+    }
+
+    #[test]
+    fn source_to_buf_line_old_only_line() {
+        let diff = "\
+diff --git a/f.rs b/f.rs
+index 000..111 100644
+--- a/f.rs
++++ b/f.rs
+@@ -1,2 +1,0 @@
+-removed_a
+-removed_b
+";
+        let hunks = parse_hunks(diff);
+        let lines: Vec<String> = diff.lines().map(String::from).collect();
+        assert!(source_to_buf_line(&hunks, 1, &lines).is_none());
     }
 
     #[test]
@@ -590,5 +679,108 @@ index 000..111 100644
         assert_eq!(hunks.len(), 1);
         let patch = build_hunk_patch(diff, &hunks[0].content_hash).unwrap();
         assert!(patch.contains("+new line"));
+    }
+
+    #[test]
+    fn parse_hunks_roundtrip_build_hunk_patch() {
+        let hunks = parse_hunks(SIMPLE_DIFF);
+        assert_eq!(hunks.len(), 1);
+        let patch = build_hunk_patch(SIMPLE_DIFF, &hunks[0].content_hash).unwrap();
+        let re_parsed = parse_hunks(&patch);
+        assert_eq!(re_parsed.len(), 1);
+        assert_eq!(re_parsed[0].content_hash, hunks[0].content_hash);
+    }
+
+    const MODIFICATION_PATCH: &str = include_str!("../../test_data/modification.patch");
+    const ADDITION_PATCH: &str = include_str!("../../test_data/addition.patch");
+    const MULTI_HUNK_PATCH: &str = include_str!("../../test_data/multi_hunk.patch");
+
+    #[test]
+    fn regression_modification_patch() {
+        let hunks = parse_hunks(MODIFICATION_PATCH);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_start, 1);
+        assert_eq!(hunks[0].old_count, 5);
+        assert_eq!(hunks[0].new_start, 1);
+        assert_eq!(hunks[0].new_count, 6);
+    }
+
+    #[test]
+    fn regression_addition_patch() {
+        let hunks = parse_hunks(ADDITION_PATCH);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].old_start, 0);
+        assert_eq!(hunks[0].old_count, 0);
+        assert_eq!(hunks[0].new_start, 1);
+        assert_eq!(hunks[0].new_count, 8);
+        let lines: Vec<&str> = ADDITION_PATCH.lines().collect();
+        let hunk_lines = &lines[hunks[0].buf_start + 1..=hunks[0].buf_end];
+        assert!(
+            hunk_lines.iter().all(|l| l.starts_with('+')),
+            "all-addition hunk should only contain + lines"
+        );
+    }
+
+    #[test]
+    fn regression_multi_hunk_patch() {
+        let hunks = parse_hunks(MULTI_HUNK_PATCH);
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].old_start, 1);
+        assert_eq!(hunks[0].new_start, 1);
+        assert_eq!(hunks[1].old_start, 20);
+        assert_eq!(hunks[1].new_start, 20);
+    }
+
+    #[test]
+    fn regression_roundtrip_all_patches() {
+        let patches = [MODIFICATION_PATCH, ADDITION_PATCH, MULTI_HUNK_PATCH];
+        for patch in patches {
+            let hunks = parse_hunks(patch);
+            assert!(
+                !hunks.is_empty(),
+                "patch should parse into at least one hunk"
+            );
+
+            for hunk in &hunks {
+                assert_eq!(
+                    hunk.content_hash.len(),
+                    12,
+                    "content_hash should be 12 hex chars"
+                );
+                assert!(
+                    hunk.content_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                    "content_hash should be hex"
+                );
+            }
+
+            let lines: Vec<String> = patch.lines().map(String::from).collect();
+            for hunk in &hunks {
+                for i in (hunk.buf_start + 1)..=hunk.buf_end {
+                    let line = &lines[i];
+                    if line.starts_with(' ') || line.starts_with('\t') {
+                        let loc = buf_line_to_source(&hunks, i, &lines, "test.rs");
+                        assert!(
+                            loc.is_some(),
+                            "context line at buf_line {i} should have a SourceLocation"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn parse_hunks_never_panics(input in ".*") {
+            let hunks = parse_hunks(&input);
+            for hunk in &hunks {
+                prop_assert!(hunk.buf_start <= hunk.buf_end);
+            }
+            for w in hunks.windows(2) {
+                prop_assert!(w[0].buf_end < w[1].buf_start);
+            }
+        }
     }
 }

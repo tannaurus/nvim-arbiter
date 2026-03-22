@@ -1,0 +1,9 @@
+---
+source: crates/arbiter/src/rules.rs
+assertion_line: 647
+expression: output
+---
+Project rules:
+- [Rust conventions] Prefer map_err over match for error transformation. Use ? for propagation.
+- [API design] All handlers must return Result<Json<T>, RouteError>. Include StatusCode only for non-200 responses.
+- [Testing] Use static fixtures parsed from JSON, not dynamically generated data. Group tests by function under test.
