@@ -43,6 +43,14 @@ pub type OnRevisionSelected = Arc<dyn Fn(u32) + Send + Sync>;
 /// Receives the thread ID of the similar thread.
 pub type OnSimilarSelected = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Event handlers for the thread panel.
+pub struct WindowCallbacks {
+    pub on_reply: OnReplyRequested,
+    pub on_close: Option<OnClose>,
+    pub on_revision: Option<OnRevisionSelected>,
+    pub on_similar: Option<OnSimilarSelected>,
+}
+
 /// Opens a split panel for the given thread.
 ///
 /// Split direction and size are controlled by `thread_window.position`
@@ -53,10 +61,7 @@ pub fn open(
     file: &str,
     line: u32,
     messages: &[Message],
-    on_reply: OnReplyRequested,
-    on_close: Option<OnClose>,
-    on_revision: Option<OnRevisionSelected>,
-    on_similar: Option<OnSimilarSelected>,
+    callbacks: WindowCallbacks,
 ) -> nvim_oxi::Result<()> {
     let ea_was_on =
         api::get_option_value::<bool>("equalalways", &OptionOpts::default()).unwrap_or(true);
@@ -138,7 +143,7 @@ pub fn open(
         let _ = api::set_option_value("winfixheight", true, &win_opts);
     }
 
-    let on_reply_cell = Arc::new(on_reply);
+    let on_reply_cell = Arc::new(callbacks.on_reply);
     let opts = SetKeymapOpts::builder()
         .callback(move |_| {
             if let Some(rev_idx) = revision_at_cursor() {
@@ -173,9 +178,9 @@ pub fn open(
     WINDOW.with(|c| *c.borrow_mut() = Some(win));
     BUFFER.with(|c| *c.borrow_mut() = Some(buf));
     THREAD_ID.with(|c| *c.borrow_mut() = Some(thread_id.to_string()));
-    ON_CLOSE.with(|c| *c.borrow_mut() = on_close);
-    ON_REVISION.with(|c| *c.borrow_mut() = on_revision);
-    ON_SIMILAR.with(|c| *c.borrow_mut() = on_similar);
+    ON_CLOSE.with(|c| *c.borrow_mut() = callbacks.on_close);
+    ON_REVISION.with(|c| *c.borrow_mut() = callbacks.on_revision);
+    ON_SIMILAR.with(|c| *c.borrow_mut() = callbacks.on_similar);
     SIMILAR_MAP.with(|c| c.borrow_mut().clear());
 
     let _ = api::create_autocmd(

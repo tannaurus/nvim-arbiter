@@ -17,14 +17,6 @@ pub(crate) enum Scenario {
     SelfReview,
 }
 
-/// Where the rule was loaded from (later sources win on description conflicts).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuleSource {
-    Global,
-    Workspace,
-    Custom(String),
-}
-
 /// A single project rule loaded from a markdown file.
 #[derive(Debug, Clone)]
 pub(crate) struct Rule {
@@ -36,9 +28,6 @@ pub(crate) struct Rule {
     pub match_patterns: Vec<String>,
     /// Which scenarios this rule applies to. Empty = all scenarios.
     pub scenarios: Vec<Scenario>,
-    /// Where the rule was loaded from. Retained for debugging and dedup semantics.
-    #[allow(dead_code)]
-    pub source: RuleSource,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,7 +68,7 @@ impl std::fmt::Display for ParseError {
 }
 
 /// Parses a rule from the raw text of a `.md` file.
-pub(crate) fn parse(text: &str, source: RuleSource) -> Result<Rule, ParseError> {
+pub(crate) fn parse(text: &str) -> Result<Rule, ParseError> {
     let trimmed = text.trim_start();
     if !trimmed.starts_with("---") {
         return Err(ParseError(
@@ -120,13 +109,12 @@ pub(crate) fn parse(text: &str, source: RuleSource) -> Result<Rule, ParseError> 
         content: body.to_string(),
         match_patterns: fm.match_patterns,
         scenarios,
-        source,
     })
 }
 
 /// Loads all `.md` rule files from a directory. Returns an empty vec if the
-/// directory does not exist. Malformed files are skipped with an eprintln warning.
-pub(crate) fn load_from_dir(dir: &Path, source: RuleSource) -> Vec<Rule> {
+/// directory does not exist. Malformed files are skipped silently.
+pub(crate) fn load_from_dir(dir: &Path) -> Vec<Rule> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -139,43 +127,41 @@ pub(crate) fn load_from_dir(dir: &Path, source: RuleSource) -> Vec<Rule> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if let Ok(rule) = parse(&text, source.clone()) {
+        if let Ok(rule) = parse(&text) {
             rules.push(rule);
         }
     }
     rules
 }
 
-/// Loads rules from all configured sources in priority order.
+/// Loads rules from all configured directories.
 ///
-/// Later sources override earlier ones when descriptions match:
-/// global < workspace < custom dirs (in order).
+/// Sources are searched in order: global, workspace, then custom dirs.
+/// All matched rules are returned; there is no deduplication.
 pub(crate) fn load_all(cwd: &str, extra_dirs: &[String]) -> Vec<Rule> {
     let mut all = Vec::new();
 
     let global_dir = dirs_global();
-    all.extend(load_from_dir(&global_dir, RuleSource::Global));
+    all.extend(load_from_dir(&global_dir));
 
     let workspace_dir = Path::new(cwd).join(".arbiter").join("rules");
-    all.extend(load_from_dir(&workspace_dir, RuleSource::Workspace));
+    all.extend(load_from_dir(&workspace_dir));
 
     for dir in extra_dirs {
         let expanded = expand_tilde(dir);
-        all.extend(load_from_dir(&expanded, RuleSource::Custom(dir.clone())));
+        all.extend(load_from_dir(&expanded));
     }
 
     all
 }
 
 /// Resolves which rules apply for a given scenario and optional file path.
-///
-/// Deduplicates by description: later sources win.
 pub(crate) fn resolve<'a>(
     rules: &'a [Rule],
     scenario: Scenario,
     file: Option<&str>,
 ) -> Vec<&'a Rule> {
-    let mut matched: Vec<&Rule> = rules
+    rules
         .iter()
         .filter(|r| {
             if !r.scenarios.is_empty() && !r.scenarios.contains(&scenario) {
@@ -193,10 +179,7 @@ pub(crate) fn resolve<'a>(
                     .unwrap_or(false)
             })
         })
-        .collect();
-
-    dedup_by_description(&mut matched);
-    matched
+        .collect()
 }
 
 /// Formats resolved rules into a block for prompt injection.
@@ -211,20 +194,6 @@ pub(crate) fn format_for_prompt(rules: &[&Rule]) -> String {
     }
     out.push('\n');
     out
-}
-
-fn dedup_by_description(rules: &mut Vec<&Rule>) {
-    let mut seen = std::collections::HashMap::new();
-    for (i, r) in rules.iter().enumerate() {
-        seen.insert(r.description.as_str(), i);
-    }
-    let keep: std::collections::HashSet<usize> = seen.into_values().collect();
-    let mut idx = 0;
-    rules.retain(|_| {
-        let k = keep.contains(&idx);
-        idx += 1;
-        k
-    });
 }
 
 fn dirs_global() -> PathBuf {
@@ -260,7 +229,7 @@ mod tests {
             "description = \"Rust style\"\nmatch = [\"**/*.rs\", \"**/*.toml\"]\nscenarios = [\"thread\"]",
             "Use map_err over match.",
         );
-        let r = parse(&text, RuleSource::Workspace).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.description, "Rust style");
         assert_eq!(r.match_patterns, vec!["**/*.rs", "**/*.toml"]);
         assert_eq!(r.scenarios, vec![Scenario::Thread]);
@@ -270,7 +239,7 @@ mod tests {
     #[test]
     fn parse_minimal_frontmatter() {
         let text = rule_text("description = \"Always applies\"", "Do the thing.");
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.description, "Always applies");
         assert!(r.match_patterns.is_empty());
         assert!(r.scenarios.is_empty());
@@ -280,13 +249,13 @@ mod tests {
     #[test]
     fn parse_missing_description_errors() {
         let text = rule_text("match = \"*.rs\"", "body");
-        assert!(parse(&text, RuleSource::Global).is_err());
+        assert!(parse(&text).is_err());
     }
 
     #[test]
     fn parse_match_single_string() {
         let text = rule_text("description = \"X\"\nmatch = \"*.rs\"", "body");
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.match_patterns, vec!["*.rs"]);
     }
 
@@ -296,14 +265,14 @@ mod tests {
             "description = \"X\"\nmatch = [\"*.rs\", \"*.toml\"]",
             "body",
         );
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.match_patterns, vec!["*.rs", "*.toml"]);
     }
 
     #[test]
     fn parse_scenarios_subset() {
         let text = rule_text("description = \"X\"\nscenarios = [\"thread\"]", "body");
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.scenarios, vec![Scenario::Thread]);
     }
 
@@ -313,33 +282,33 @@ mod tests {
             "description = \"X\"\nscenarios = [\"thread\", \"future_thing\"]",
             "body",
         );
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert_eq!(r.scenarios, vec![Scenario::Thread]);
     }
 
     #[test]
     fn parse_no_frontmatter_errors() {
         let text = "Just some text without frontmatter.";
-        assert!(parse(text, RuleSource::Global).is_err());
+        assert!(parse(text).is_err());
     }
 
     #[test]
     fn parse_body_after_frontmatter() {
         let text = "---\ndescription = \"X\"\n---\n\n  Hello world  \n\n";
-        let r = parse(text, RuleSource::Global).unwrap();
+        let r = parse(text).unwrap();
         assert_eq!(r.content, "Hello world");
     }
 
     #[test]
     fn parse_empty_body_errors() {
         let text = "---\ndescription = \"X\"\n---\n   \n";
-        assert!(parse(text, RuleSource::Global).is_err());
+        assert!(parse(text).is_err());
     }
 
     #[test]
     fn parse_whitespace_only_description() {
         let text = rule_text("description = \"   \t  \"", "body");
-        let err = parse(&text, RuleSource::Global).unwrap_err();
+        let err = parse(&text).unwrap_err();
         assert!(
             err.0.contains("description"),
             "expected missing-description error, got: {err}"
@@ -349,100 +318,76 @@ mod tests {
     #[test]
     fn parse_no_leading_newline_delimiter() {
         let text = "---\ndescription = \"x\"\n---\nbody";
-        let r = parse(text, RuleSource::Global).unwrap();
+        let r = parse(text).unwrap();
         assert_eq!(r.description, "x");
         assert_eq!(r.content, "body");
     }
 
-    fn make_rule(desc: &str, globs: &[&str], scenarios: Vec<Scenario>, source: RuleSource) -> Rule {
+    fn make_rule(desc: &str, globs: &[&str], scenarios: Vec<Scenario>) -> Rule {
         Rule {
             description: desc.to_string(),
             content: "body".to_string(),
             match_patterns: globs.iter().map(|s| s.to_string()).collect(),
             scenarios,
-            source,
         }
     }
 
     #[test]
     fn resolve_thread_matches_glob() {
-        let rules = [make_rule("Rust", &["**/*.rs"], vec![], RuleSource::Global)];
+        let rules = [make_rule("Rust", &["**/*.rs"], vec![])];
         let matched = resolve(&rules, Scenario::Thread, Some("src/lib.rs"));
         assert_eq!(matched.len(), 1);
     }
 
     #[test]
     fn resolve_thread_glob_no_match() {
-        let rules = [make_rule("Rust", &["**/*.rs"], vec![], RuleSource::Global)];
+        let rules = [make_rule("Rust", &["**/*.rs"], vec![])];
         let matched = resolve(&rules, Scenario::Thread, Some("README.md"));
         assert!(matched.is_empty());
     }
 
     #[test]
     fn resolve_self_review_skips_glob_rules() {
-        let rules = [make_rule("Rust", &["**/*.rs"], vec![], RuleSource::Global)];
+        let rules = [make_rule("Rust", &["**/*.rs"], vec![])];
         let matched = resolve(&rules, Scenario::SelfReview, None);
         assert!(matched.is_empty());
     }
 
     #[test]
     fn resolve_self_review_includes_matchless() {
-        let rules = [make_rule("General", &[], vec![], RuleSource::Global)];
+        let rules = [make_rule("General", &[], vec![])];
         let matched = resolve(&rules, Scenario::SelfReview, None);
         assert_eq!(matched.len(), 1);
     }
 
     #[test]
     fn resolve_scenario_filter() {
-        let rules = [make_rule(
-            "Thread only",
-            &[],
-            vec![Scenario::Thread],
-            RuleSource::Global,
-        )];
+        let rules = [make_rule("Thread only", &[], vec![Scenario::Thread])];
         let matched = resolve(&rules, Scenario::SelfReview, None);
         assert!(matched.is_empty());
     }
 
     #[test]
     fn resolve_no_scenario_restriction() {
-        let rules = [make_rule("All", &[], vec![], RuleSource::Global)];
+        let rules = [make_rule("All", &[], vec![])];
         assert_eq!(resolve(&rules, Scenario::Thread, Some("a.rs")).len(), 1);
         assert_eq!(resolve(&rules, Scenario::SelfReview, None).len(), 1);
     }
 
     #[test]
-    fn resolve_workspace_overrides_global() {
-        let mut g = make_rule("Same", &[], vec![], RuleSource::Global);
-        g.content = "global".to_string();
-        let mut w = make_rule("Same", &[], vec![], RuleSource::Workspace);
-        w.content = "workspace".to_string();
-        let rules = [g, w];
+    fn resolve_duplicate_descriptions_both_included() {
+        let mut a = make_rule("Same", &[], vec![]);
+        a.content = "first".to_string();
+        let mut b = make_rule("Same", &[], vec![]);
+        b.content = "second".to_string();
+        let rules = [a, b];
         let matched = resolve(&rules, Scenario::Thread, Some("a.rs"));
-        assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].content, "workspace");
-    }
-
-    #[test]
-    fn resolve_custom_overrides_workspace() {
-        let mut w = make_rule("Same", &[], vec![], RuleSource::Workspace);
-        w.content = "workspace".to_string();
-        let mut c = make_rule("Same", &[], vec![], RuleSource::Custom("x".to_string()));
-        c.content = "custom".to_string();
-        let rules = [w, c];
-        let matched = resolve(&rules, Scenario::Thread, Some("a.rs"));
-        assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].content, "custom");
+        assert_eq!(matched.len(), 2);
     }
 
     #[test]
     fn resolve_multiple_globs() {
-        let rules = [make_rule(
-            "Multi",
-            &["*.rs", "*.toml"],
-            vec![],
-            RuleSource::Global,
-        )];
+        let rules = [make_rule("Multi", &["*.rs", "*.toml"], vec![])];
         assert_eq!(resolve(&rules, Scenario::Thread, Some("lib.rs")).len(), 1);
         assert_eq!(
             resolve(&rules, Scenario::Thread, Some("Cargo.toml")).len(),
@@ -453,9 +398,9 @@ mod tests {
 
     #[test]
     fn resolve_order_preserved() {
-        let mut a = make_rule("A", &[], vec![], RuleSource::Global);
+        let mut a = make_rule("A", &[], vec![]);
         a.content = "first".to_string();
-        let mut b = make_rule("B", &[], vec![], RuleSource::Workspace);
+        let mut b = make_rule("B", &[], vec![]);
         b.content = "second".to_string();
         let rules = [a, b];
         let matched = resolve(&rules, Scenario::Thread, Some("a.rs"));
@@ -465,12 +410,7 @@ mod tests {
 
     #[test]
     fn resolve_invalid_glob_no_match() {
-        let rules = [make_rule(
-            "Bad glob",
-            &["[invalid"],
-            vec![],
-            RuleSource::Global,
-        )];
+        let rules = [make_rule("Bad glob", &["[invalid"], vec![])];
         let matched = resolve(&rules, Scenario::Thread, Some("src/lib.rs"));
         assert!(matched.is_empty());
     }
@@ -478,7 +418,7 @@ mod tests {
     #[test]
     fn parse_unknown_scenarios_broadens_scope() {
         let text = rule_text("description = \"X\"\nscenarios = [\"bogus\"]", "body");
-        let r = parse(&text, RuleSource::Global).unwrap();
+        let r = parse(&text).unwrap();
         assert!(r.scenarios.is_empty());
 
         let rules = [r];
@@ -497,7 +437,7 @@ scenarios = [\"thread\"]
 Prefer map_err over match for error conversion.
 Use ? for propagation.";
 
-        let rule = parse(md, RuleSource::Workspace).unwrap();
+        let rule = parse(md).unwrap();
         assert_eq!(rule.description, "Rust conventions");
 
         let rules = [rule];
@@ -524,13 +464,13 @@ Use ? for propagation.";
         )
         .unwrap();
         std::fs::write(tmp.path().join("not-a-rule.txt"), "ignore me").unwrap();
-        let rules = load_from_dir(tmp.path(), RuleSource::Workspace);
+        let rules = load_from_dir(tmp.path());
         assert_eq!(rules.len(), 2);
     }
 
     #[test]
     fn load_from_dir_missing_dir() {
-        let rules = load_from_dir(Path::new("/nonexistent/dir/12345"), RuleSource::Global);
+        let rules = load_from_dir(Path::new("/nonexistent/dir/12345"));
         assert!(rules.is_empty());
     }
 
@@ -543,7 +483,7 @@ Use ? for propagation.";
         )
         .unwrap();
         std::fs::write(tmp.path().join("bad.md"), "no frontmatter here").unwrap();
-        let rules = load_from_dir(tmp.path(), RuleSource::Workspace);
+        let rules = load_from_dir(tmp.path());
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].description, "Good");
     }
@@ -575,12 +515,9 @@ Use ? for propagation.";
         )
         .unwrap();
 
-        let g_rules = load_from_dir(global.path(), RuleSource::Global);
-        let w_rules = load_from_dir(workspace.path(), RuleSource::Workspace);
-        let c_rules = load_from_dir(
-            custom.path(),
-            RuleSource::Custom(custom.path().to_string_lossy().to_string()),
-        );
+        let g_rules = load_from_dir(global.path());
+        let w_rules = load_from_dir(workspace.path());
+        let c_rules = load_from_dir(custom.path());
 
         let mut all = Vec::new();
         all.extend(g_rules);
@@ -588,10 +525,7 @@ Use ? for propagation.";
         all.extend(c_rules);
 
         let resolved = resolve(&all, Scenario::Thread, Some("a.rs"));
-        assert_eq!(resolved.len(), 3);
-
-        let shared = resolved.iter().find(|r| r.description == "Shared").unwrap();
-        assert_eq!(shared.content, "workspace version");
+        assert_eq!(resolved.len(), 4);
     }
 
     #[test]
@@ -606,7 +540,6 @@ Use ? for propagation.";
             content: "Use constants".to_string(),
             match_patterns: vec![],
             scenarios: vec![],
-            source: RuleSource::Global,
         };
         let out = format_for_prompt(&[&r]);
         assert!(out.contains("Project rules:"));
@@ -627,21 +560,18 @@ Use ? for propagation.";
                 .to_string(),
             match_patterns: vec!["**/*.rs".to_string()],
             scenarios: vec![Scenario::Thread],
-            source: RuleSource::Workspace,
         };
         let r2 = Rule {
             description: "API design".to_string(),
             content: "All handlers must return Result<Json<T>, RouteError>. Include StatusCode only for non-200 responses.".to_string(),
             match_patterns: vec!["**/handler*.rs".to_string()],
             scenarios: vec![],
-            source: RuleSource::Global,
         };
         let r3 = Rule {
             description: "Testing".to_string(),
             content: "Use static fixtures parsed from JSON, not dynamically generated data. Group tests by function under test.".to_string(),
             match_patterns: vec![],
             scenarios: vec![Scenario::Thread, Scenario::SelfReview],
-            source: RuleSource::Custom("~/.config/team/rules".to_string()),
         };
         let output = format_for_prompt(&[&r1, &r2, &r3]);
         insta::assert_snapshot!("format_for_prompt_multiple_rules", output);
@@ -652,7 +582,7 @@ Use ? for propagation.";
     proptest! {
         #[test]
         fn parse_never_panics(input in ".*") {
-            let _ = parse(&input, RuleSource::Workspace);
+            let _ = parse(&input);
         }
     }
 }

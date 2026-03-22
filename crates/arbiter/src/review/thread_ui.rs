@@ -69,12 +69,14 @@ fn make_thread_reply_callback(
                         project_rules: project_rules_text,
                     };
                     let prompt = prompts::format_reply_prompt(
-                        &t_file,
-                        t_line,
-                        &text,
-                        &t_anchor,
-                        &t_context,
-                        &prior_messages,
+                        &prompts::ReplyContext {
+                            file: &t_file,
+                            line: t_line,
+                            reply: &text,
+                            anchor_content: &t_anchor,
+                            context: &t_context,
+                            prior_messages: &prior_messages,
+                        },
                         &review_ctx,
                         &similar_ctx,
                     );
@@ -194,10 +196,12 @@ pub(super) fn open_thread_panel(review: &Review, t: &threads::Thread) {
         &t.file,
         t.line,
         &t.messages,
-        on_reply,
-        Some(on_close),
-        Some(on_revision),
-        Some(on_similar),
+        threads::WindowCallbacks {
+            on_reply,
+            on_close: Some(on_close),
+            on_revision: Some(on_revision),
+            on_similar: Some(on_similar),
+        },
     );
     for rev in &t.revisions {
         let stats: Vec<(String, usize, usize)> = rev
@@ -517,10 +521,12 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                 &thread.file,
                 thread.line,
                 &thread.messages,
-                on_reply,
-                Some(on_close),
-                Some(on_revision),
-                Some(on_similar),
+                threads::WindowCallbacks {
+                    on_reply,
+                    on_close: Some(on_close),
+                    on_revision: Some(on_revision),
+                    on_similar: Some(on_similar),
+                },
             );
             if !thread.similar_threads.is_empty() {
                 let _ = threads::append_similar_threads(&thread.similar_threads);

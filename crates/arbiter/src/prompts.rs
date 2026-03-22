@@ -43,6 +43,16 @@ pub(crate) fn format_comment_prompt(
     format!("{preamble}{ctx_block}\nComment: {comment}")
 }
 
+/// Thread-level context for a reply prompt.
+pub(crate) struct ReplyContext<'a> {
+    pub file: &'a str,
+    pub line: u32,
+    pub reply: &'a str,
+    pub anchor_content: &'a str,
+    pub context: &'a [String],
+    pub prior_messages: &'a [(String, String)],
+}
+
 /// Formats a reply prompt with file/line context.
 ///
 /// When resuming an existing session the agent already has prior conversation
@@ -53,22 +63,22 @@ pub(crate) fn format_comment_prompt(
 /// conversations are appended so the agent can factor in prior solutions
 /// without being told to apply them blindly.
 pub(crate) fn format_reply_prompt(
-    file: &str,
-    line: u32,
-    reply: &str,
-    anchor_content: &str,
-    context: &[String],
-    prior_messages: &[(String, String)],
+    thread: &ReplyContext<'_>,
     review_ctx: &ReviewContext<'_>,
     similar_threads: &[SimilarThreadContext],
 ) -> String {
-    let preamble = format_review_preamble(review_ctx, file);
-    let ctx_block = format_context_block(file, line, anchor_content, context);
+    let preamble = format_review_preamble(review_ctx, thread.file);
+    let ctx_block = format_context_block(
+        thread.file,
+        thread.line,
+        thread.anchor_content,
+        thread.context,
+    );
     let mut prompt = format!("{preamble}{ctx_block}");
 
-    if !prior_messages.is_empty() {
+    if !thread.prior_messages.is_empty() {
         prompt.push_str("\n\nThread history:\n");
-        for (role, text) in prior_messages {
+        for (role, text) in thread.prior_messages {
             prompt.push_str(&format!("[{role}]: {text}\n"));
         }
     }
@@ -92,7 +102,7 @@ pub(crate) fn format_reply_prompt(
         }
     }
 
-    prompt.push_str(&format!("\nReply: {reply}"));
+    prompt.push_str(&format!("\nReply: {}", thread.reply));
     prompt
 }
 
@@ -675,7 +685,18 @@ mod tests {
             project_rules: String::new(),
         };
         let msgs = vec![("user".to_string(), "hi".to_string())];
-        let prompt = format_reply_prompt("a.rs", 5, "ok", "let x = 1;", &[], &msgs, &ctx, &[]);
+        let prompt = format_reply_prompt(
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "ok",
+                anchor_content: "let x = 1;",
+                context: &[],
+                prior_messages: &msgs,
+            },
+            &ctx,
+            &[],
+        );
         assert!(prompt.contains("compared against `develop`"));
         assert!(prompt.contains("- Prefer map_err"));
         assert!(prompt.contains("Reply: ok"));
@@ -699,12 +720,14 @@ mod tests {
             ],
         }];
         let prompt = format_reply_prompt(
-            "a.rs",
-            5,
-            "thoughts?",
-            "let x = 1;",
-            &[],
-            &[],
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "thoughts?",
+                anchor_content: "let x = 1;",
+                context: &[],
+                prior_messages: &[],
+            },
             &ctx,
             &similar,
         );
@@ -724,12 +747,14 @@ mod tests {
             ("agent".to_string(), "I'll fix that".to_string()),
         ];
         let prompt = format_reply_prompt(
-            "a.rs",
-            5,
-            "looks good",
-            "let x = 1;",
-            &[],
-            &prior,
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "looks good",
+                anchor_content: "let x = 1;",
+                context: &[],
+                prior_messages: &prior,
+            },
             &ctx,
             &[],
         );
@@ -747,7 +772,18 @@ mod tests {
             review_rules: &[],
             project_rules: String::new(),
         };
-        let prompt = format_reply_prompt("a.rs", 5, "ok", "let x = 1;", &[], &[], &ctx, &[]);
+        let prompt = format_reply_prompt(
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "ok",
+                anchor_content: "let x = 1;",
+                context: &[],
+                prior_messages: &[],
+            },
+            &ctx,
+            &[],
+        );
         assert!(!prompt.contains("Related threads"));
     }
 
@@ -873,12 +909,14 @@ mod tests {
             "}".to_string(),
         ];
         let output = format_reply_prompt(
-            "src/main.rs",
-            2,
-            "Can you also add error handling for setup()?",
-            "    setup();",
-            &context_lines,
-            &prior,
+            &ReplyContext {
+                file: "src/main.rs",
+                line: 2,
+                reply: "Can you also add error handling for setup()?",
+                anchor_content: "    setup();",
+                context: &context_lines,
+                prior_messages: &prior,
+            },
             &ctx,
             &similar,
         );

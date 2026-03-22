@@ -76,6 +76,16 @@ fn set_buffer_lines(buf: &mut Buffer, lines: &[String]) -> nvim_oxi::Result<()> 
     Ok(())
 }
 
+/// Result of rendering a diff buffer.
+pub(crate) struct RenderResult {
+    /// Hunks with buf_start/buf_end offset by injected header/summary lines.
+    pub hunks: Vec<Hunk>,
+    /// Map of thread_id to the buffer line showing that thread's summary.
+    pub thread_buf_lines: HashMap<String, usize>,
+    /// All lines written to the buffer (header + summaries + diff).
+    pub lines: Vec<String>,
+}
+
 /// Renders diff text and thread summaries into a buffer.
 ///
 /// Builds: file header line, thread summary lines (filtered by
@@ -93,7 +103,7 @@ pub(crate) fn render(
     show_resolved: bool,
     new_hunk_buf_starts: Option<&HashSet<usize>>,
     accepted_hashes: &HashSet<String>,
-) -> nvim_oxi::Result<(Vec<Hunk>, HashMap<String, usize>, Vec<String>)> {
+) -> nvim_oxi::Result<RenderResult> {
     let hunks = parse::parse_hunks(diff_text);
     let diff_lines: Vec<String> = diff_text.lines().map(|s| s.to_string()).collect();
 
@@ -214,7 +224,11 @@ pub(crate) fn render(
         &accepted_buf_starts,
     )?;
 
-    Ok((adjusted_hunks, thread_buf_lines, all_lines))
+    Ok(RenderResult {
+        hunks: adjusted_hunks,
+        thread_buf_lines,
+        lines: all_lines,
+    })
 }
 
 /// Applies syntax highlighting to the diff buffer.

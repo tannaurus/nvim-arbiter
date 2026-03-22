@@ -13,4 +13,5 @@ pub(crate) use parse::{
 };
 pub(crate) use render::{
     apply_highlights, close_side_by_side, open_side_by_side, render, set_hunk_folds, win_exec,
+    RenderResult,
 };

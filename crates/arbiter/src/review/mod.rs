@@ -1069,7 +1069,11 @@ fn refresh_file_with_diff(
     review.current_diff_text = diff_text.to_string();
 
     let file_accepted = review.accepted_hunks.get(path).cloned().unwrap_or_default();
-    if let Ok((hunks, thread_buf_lines, diff_lines)) = diff::render(
+    if let Ok(diff::RenderResult {
+        hunks,
+        thread_buf_lines,
+        lines: diff_lines,
+    }) = diff::render(
         &mut review.diff_panel.buf,
         diff_text,
         &summaries,
@@ -1338,7 +1342,11 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             .collect();
         let summaries = threads::to_summaries(&file_threads);
         let file_accepted = review.accepted_hunks.get(path).cloned().unwrap_or_default();
-        if let Ok((hunks, thread_buf_lines, diff_lines)) = diff::render(
+        if let Ok(diff::RenderResult {
+            hunks,
+            thread_buf_lines,
+            lines: diff_lines,
+        }) = diff::render(
             &mut review.diff_panel.buf,
             &diff_text,
             &summaries,
@@ -1406,7 +1414,11 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             String::new()
         };
         let summaries = threads::to_summaries(&threads_for_file);
-        if let Ok((hunks, thread_buf_lines, diff_lines)) = diff::render(
+        if let Ok(diff::RenderResult {
+            hunks,
+            thread_buf_lines,
+            lines: diff_lines,
+        }) = diff::render(
             &mut diff_buf,
             &diff_text,
             &summaries,

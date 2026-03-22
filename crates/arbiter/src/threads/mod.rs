@@ -12,7 +12,7 @@ pub use window::{
     append_similar_threads, append_status, append_streaming, close as window_close,
     current_thread_id as window_thread_id, handle as window_handle, is_open as window_is_open,
     open as window_open, replace_last_agent_message, OnClose, OnReplyRequested, OnRevisionSelected,
-    OnSimilarSelected,
+    OnSimilarSelected, WindowCallbacks,
 };
 
 use crate::types::{Role, ThreadOrigin, ThreadStatus};

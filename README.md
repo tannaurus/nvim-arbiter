@@ -231,8 +231,7 @@ require("arbiter").setup({
 
   -- Additional directories to search for project rule files.
   -- Searched after the default locations (~/.config/arbiter/rules/ and
-  -- .arbiter/rules/ in the workspace). Later sources win when rule
-  -- descriptions conflict.
+  -- .arbiter/rules/ in the workspace).
   rules_dirs = {},
 
   review = {
@@ -426,10 +425,6 @@ Rules are loaded from three locations, in order:
 
 Only `.md` files are loaded. Subdirectories are not traversed. Malformed files are silently skipped.
 
-#### Precedence
-
-When two rules share the same `description`, the later source wins. This means a workspace rule overrides a global rule with the same name, and a custom directory overrides both. Use this to set team-wide defaults globally and override them per-project.
-
 #### Resolution
 
 When Arbiter builds a prompt, it resolves which rules apply based on two filters:
@@ -490,6 +485,22 @@ When arbiter sends feedback to the agent, the agent may need to run shell comman
 **Claude Code** - See the [Claude Code docs](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) for configuring allowed tools.
 
 Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_args` is discouraged. These flags allow the agent to run arbitrary commands without approval, including destructive operations like `rm -rf` or `git push --force`.
+
+### Statusline
+
+The plugin exposes a statusline component that shows backend activity. Call it from your statusline config:
+
+```lua
+-- lualine example
+lualine_x = {
+  { function() return require("arbiter").statusline() end },
+}
+
+-- Plain statusline
+vim.o.statusline = vim.o.statusline .. " %{v:lua.require('arbiter').statusline()}"
+```
+
+When the agent is processing a request, the component shows a spinner with elapsed time (e.g. `⠋ thinking 5s`). With an active review, it shows progress (e.g. `[REVIEW 2/5]`). When idle with no review, it returns an empty string.
 
 ## Commands
 
@@ -632,22 +643,6 @@ cargo build --release
 Output: `target/release/libarbiter.dylib` (macOS) or `libarbiter.so` (Linux).
 
 Other tasks: `task install`, `task test`, `task lint`, `task fmt`, `task check` (runs all three).
-
-## Statusline
-
-The plugin exposes a statusline component that shows backend activity. Call it from your statusline config:
-
-```lua
--- lualine example
-lualine_x = {
-  { function() return require("arbiter").statusline() end },
-}
-
--- Plain statusline
-vim.o.statusline = vim.o.statusline .. " %{v:lua.require('arbiter').statusline()}"
-```
-
-When the agent is processing a request, the component shows a spinner with elapsed time (e.g. `⠋ thinking 5s`). With an active review, it shows progress (e.g. `[REVIEW 2/5]`). When idle with no review, it returns an empty string.
 
 ## Architecture
 

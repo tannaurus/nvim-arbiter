@@ -153,7 +153,11 @@ pub(super) fn render_revision_file(review: &mut Review, path: &str) {
 
     let accepted = rv.accepted_hunks.get(path).cloned().unwrap_or_default();
     let summaries = Vec::new();
-    if let Ok((hunks, thread_buf_lines, diff_lines)) = diff::render(
+    if let Ok(diff::RenderResult {
+        hunks,
+        thread_buf_lines,
+        lines: diff_lines,
+    }) = diff::render(
         &mut review.diff_panel.buf,
         &diff_text,
         &summaries,
