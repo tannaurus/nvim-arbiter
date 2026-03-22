@@ -44,19 +44,19 @@ function M.check()
     vim.health.error("git not found on PATH (required for diffs)")
   end
 
-  local has_cursor = vim.fn.executable("cursor") == 1
+  local has_agent = vim.fn.executable("agent") == 1
   local has_claude = vim.fn.executable("claude") == 1
-  if has_cursor then
-    vim.health.ok("Cursor CLI found on PATH")
+  if has_agent then
+    vim.health.ok("Cursor CLI (`agent`) found on PATH")
   end
   if has_claude then
     vim.health.ok("Claude Code CLI found on PATH")
   end
-  if not has_cursor and not has_claude then
+  if not has_agent and not has_claude then
     vim.health.error(
       "No backend CLI found",
       {
-        "Install Cursor (provides the `cursor` CLI)",
+        "Install the Cursor CLI (`agent`): https://docs.cursor.com/cli",
         "Or install Claude Code: `npm install -g @anthropic-ai/claude-code`",
       }
     )

@@ -97,7 +97,7 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 | Neovim | 0.10+ | Uses `vim.uv`, `vim.fs`, and nvim-oxi 0.11 API features |
 | Rust toolchain | stable | `cargo` and `rustc` must be on `$PATH` to compile the native library |
 | Git | any recent | The plugin shells out to `git` for diffs, merge-base, file lists, etc. |
-| Cursor CLI **or** Claude Code CLI | | At least one: `cursor` (via Cursor editor) or `claude` (via `npm install -g @anthropic-ai/claude-code`) |
+| Cursor CLI **or** Claude Code CLI | | At least one: `agent` (via [Cursor CLI](https://docs.cursor.com/cli)) or `claude` (via `npm install -g @anthropic-ai/claude-code`) |
 | nvim-tree | recommended | Recommended for the file panel. A basic builtin tree ships by default, but nvim-tree provides file icons, review status signs, and familiar keybindings. See [Using nvim-tree](#using-nvim-tree). |
 
 **Platform support:** macOS and Linux. No Windows support.
