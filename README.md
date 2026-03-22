@@ -187,6 +187,45 @@ Run `:checkhealth arbiter` to verify your installation. It checks:
 
 ## Configuration
 
+### Plugin integrations
+
+#### nvim-tree
+
+Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, needs changes, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
+
+To enable it, set `file_panel = "nvim-tree"` in your arbiter config and wire arbiter's filter into your nvim-tree setup:
+
+```lua
+require("nvim-tree").setup({
+  -- your existing config ...
+  filters = {
+    custom = require("arbiter.nvim_tree_adapter").filter,
+  },
+})
+```
+
+The filter is context-aware: when no review is active, it returns `false` for everything and nvim-tree behaves normally. When a review is open, it hides files that aren't part of the changeset. The filter is cleared automatically when the review closes.
+
+If you skip the `filters.custom` step, the nvim-tree panel will still work but will show all files in the project, not just changed ones.
+
+#### Statusline
+
+The plugin exposes a statusline component that shows backend activity. Call it from your statusline config:
+
+```lua
+-- lualine example
+lualine_x = {
+  { function() return require("arbiter").statusline() end },
+}
+
+-- Plain statusline
+vim.o.statusline = vim.o.statusline .. " %{v:lua.require('arbiter').statusline()}"
+```
+
+When the agent is processing a request, the component shows a spinner with elapsed time (e.g. `⠋ thinking 5s`). With an active review, it shows progress (e.g. `[REVIEW 2/5]`). When idle with no review, it returns an empty string.
+
+### Options
+
 All fields are optional. Missing fields use the defaults shown below.
 
 ```lua
@@ -448,25 +487,6 @@ Project rules are the opposite: written ahead of time, versioned in your repo, a
 | `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
 | `:ArbiterReloadRules` | Re-read project rule files from disk and report the count. Useful after adding or editing rule files without restarting the review. |
 
-### Using nvim-tree
-
-Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, needs changes, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
-
-To enable it, set `file_panel = "nvim-tree"` in your arbiter config and wire arbiter's filter into your nvim-tree setup:
-
-```lua
-require("nvim-tree").setup({
-  -- your existing config ...
-  filters = {
-    custom = require("arbiter.nvim_tree_adapter").filter,
-  },
-})
-```
-
-The filter is context-aware: when no review is active, it returns `false` for everything and nvim-tree behaves normally. When a review is open, it hides files that aren't part of the changeset. The filter is cleared automatically when the review closes.
-
-If you skip the `filters.custom` step, the nvim-tree panel will still work but will show all files in the project, not just changed ones.
-
 ### Backend permissions
 
 When arbiter sends feedback to the agent, the agent may need to run shell commands (e.g. `git`, `cargo fmt`) to apply changes. By default, both Cursor and Claude Code require interactive approval for shell commands. Since arbiter runs the CLI non-interactively, the agent will simply report that it cannot execute the command rather than prompting you.
@@ -485,22 +505,6 @@ When arbiter sends feedback to the agent, the agent may need to run shell comman
 **Claude Code** - See the [Claude Code docs](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) for configuring allowed tools.
 
 Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_args` is discouraged. These flags allow the agent to run arbitrary commands without approval, including destructive operations like `rm -rf` or `git push --force`.
-
-### Statusline
-
-The plugin exposes a statusline component that shows backend activity. Call it from your statusline config:
-
-```lua
--- lualine example
-lualine_x = {
-  { function() return require("arbiter").statusline() end },
-}
-
--- Plain statusline
-vim.o.statusline = vim.o.statusline .. " %{v:lua.require('arbiter').statusline()}"
-```
-
-When the agent is processing a request, the component shows a spinner with elapsed time (e.g. `⠋ thinking 5s`). With an active review, it shows progress (e.g. `[REVIEW 2/5]`). When idle with no review, it returns an empty string.
 
 ## Commands
 
