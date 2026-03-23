@@ -11,38 +11,38 @@ use std::collections::HashSet;
 /// Buffer positions (`buf_start`, `buf_end`) are 0-based and inclusive.
 /// They are populated by the renderer after accounting for injected lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Hunk {
+pub struct Hunk {
     /// First buffer line of this hunk (0-based).
-    pub(crate) buf_start: usize,
+    pub buf_start: usize,
     /// Last buffer line of this hunk (0-based).
-    pub(crate) buf_end: usize,
+    pub buf_end: usize,
     /// Start line in the old file (1-based).
-    pub(crate) old_start: usize,
+    pub old_start: usize,
     /// Number of lines in the old file.
-    pub(crate) old_count: usize,
+    pub old_count: usize,
     /// Start line in the new file (1-based).
-    pub(crate) new_start: usize,
+    pub new_start: usize,
     /// Number of lines in the new file.
-    pub(crate) new_count: usize,
+    pub new_count: usize,
     /// Raw header line (e.g. `@@ -1,3 +1,4 @@`).
-    pub(crate) header: String,
+    pub header: String,
     /// Hash of the hunk's content lines (excluding header).
-    pub(crate) content_hash: String,
+    pub content_hash: String,
 }
 
 /// Source file location for a buffer line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceLocation {
+pub struct SourceLocation {
     /// File path (from diff header or caller).
-    pub(crate) file: String,
+    pub file: String,
     /// 1-based line number in the source file.
-    pub(crate) line: usize,
+    pub line: usize,
 }
 
 /// Computes a content hash for change detection.
 ///
 /// Uses SHA256 truncated to 12 hex chars. Deterministic.
-pub(crate) fn content_hash(text: &str) -> String {
+pub fn content_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let result = hasher.finalize();
@@ -58,7 +58,7 @@ pub(crate) fn content_hash(text: &str) -> String {
 /// binary, rename, and empty diffs. Returns empty vec for empty or
 /// non-diff input. `buf_start`/`buf_end` reflect the actual line positions
 /// in the full diff text (including file headers).
-pub(crate) fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
+pub fn parse_hunks(diff_text: &str) -> Vec<Hunk> {
     let lines: Vec<&str> = diff_text.lines().collect();
     let mut hunks = Vec::new();
     let mut i = 0;
@@ -138,7 +138,7 @@ fn parse_range(part: &str, prefix: char) -> Option<(usize, usize)> {
 /// `lines` is the full buffer content; `file_path` is the path being displayed.
 /// Returns None for lines outside any hunk. Uses new file line for additions
 /// and context, old file line for deletions.
-pub(crate) fn buf_line_to_source(
+pub fn buf_line_to_source(
     hunks: &[Hunk],
     buf_line: usize,
     lines: &[impl AsRef<str>],
@@ -187,7 +187,7 @@ pub(crate) fn buf_line_to_source(
 /// Scans each hunk's content to find where `source_line` appears in the
 /// new-file line numbering. Returns the 0-based buffer line, or `None`
 /// if the line is not covered by any hunk.
-pub(crate) fn source_to_buf_line(
+pub fn source_to_buf_line(
     hunks: &[Hunk],
     source_line: usize,
     lines: &[impl AsRef<str>],
@@ -216,7 +216,7 @@ pub(crate) fn source_to_buf_line(
 /// Produces a synthetic all-additions diff for an untracked file.
 ///
 /// Every line is prefixed with `+`. Handles empty file.
-pub(crate) fn synthesize_untracked(contents: &str, path: &str) -> String {
+pub fn synthesize_untracked(contents: &str, path: &str) -> String {
     let mut out = format!("diff --git a/{path} b/{path}\n");
     out.push_str("new file mode 100644\n");
     out.push_str("index 0000000..0000000 100644\n");
@@ -243,7 +243,7 @@ pub(crate) fn synthesize_untracked(contents: &str, path: &str) -> String {
 /// Extracts the file header (diff --git, index, ---, +++) and the hunk
 /// matching `target_hash` from raw diff text. Returns `None` if the
 /// hunk is not found or the diff has no file header.
-pub(crate) fn build_hunk_patch(diff_text: &str, target_hash: &str) -> Option<String> {
+pub fn build_hunk_patch(diff_text: &str, target_hash: &str) -> Option<String> {
     let lines: Vec<&str> = diff_text.lines().collect();
 
     let header_end = lines.iter().position(|l| l.starts_with("@@ "))?;
@@ -268,10 +268,7 @@ pub(crate) fn build_hunk_patch(diff_text: &str, target_hash: &str) -> Option<Str
 /// Compares old content hashes against new hunks.
 ///
 /// Returns buf_start lines for hunks that are new or changed.
-pub(crate) fn detect_hunk_changes(
-    old_hashes: &HashSet<String>,
-    new_hunks: &[Hunk],
-) -> HashSet<usize> {
+pub fn detect_hunk_changes(old_hashes: &HashSet<String>, new_hunks: &[Hunk]) -> HashSet<usize> {
     new_hunks
         .iter()
         .filter(|h| !old_hashes.contains(&h.content_hash))
@@ -691,9 +688,9 @@ index 000..111 100644
         assert_eq!(re_parsed[0].content_hash, hunks[0].content_hash);
     }
 
-    const MODIFICATION_PATCH: &str = include_str!("../../test_data/modification.patch");
-    const ADDITION_PATCH: &str = include_str!("../../test_data/addition.patch");
-    const MULTI_HUNK_PATCH: &str = include_str!("../../test_data/multi_hunk.patch");
+    const MODIFICATION_PATCH: &str = include_str!("../test_data/modification.patch");
+    const ADDITION_PATCH: &str = include_str!("../test_data/addition.patch");
+    const MULTI_HUNK_PATCH: &str = include_str!("../test_data/multi_hunk.patch");
 
     #[test]
     fn regression_modification_patch() {

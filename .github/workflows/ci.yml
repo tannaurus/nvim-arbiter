@@ -19,7 +19,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
-      - run: cargo fmt -p arbiter -- --check
+      - run: cargo fmt -p arbiter -p arbiter-core -- --check
 
   clippy:
     name: cargo clippy
@@ -31,9 +31,9 @@ jobs:
         with:
           components: clippy
           cache: true
-      - run: cargo clippy -p arbiter -- -D warnings
+      - run: cargo clippy -p arbiter -p arbiter-core -- -D warnings
 
-  test:
+  unit-test:
     name: Unit tests
     runs-on: ubuntu-latest
     steps:
@@ -42,11 +42,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-      - run: cargo test -p arbiter
-        env:
-          RUSTFLAGS: "-C link-arg=-Wl,--allow-undefined"
+      - run: cargo test -p arbiter-core
 
-  integration:
+  integration-test:
     name: Integration tests
     runs-on: ubuntu-latest
     steps:

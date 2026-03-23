@@ -650,21 +650,30 @@ Other tasks: `task install`, `task test`, `task lint`, `task fmt`, `task check` 
 
 ## Architecture
 
-The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C API. Key modules:
+The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C API. The codebase is split into two crates:
 
-- `backend/` - CLI adapter shim (Cursor, Claude) with FIFO queue, streaming support, and shared response parsing
-- `diff/` - Unified diff parser and buffer renderer
-- `threads/` - Thread CRUD, anchoring, re-anchoring, filtering, and thread panel
-- `review/` - Core review workbench: lifecycle, keymaps, navigation, hunk acceptance, thread UI, and revision view
+**`arbiter-core`** - Pure-logic library with no Neovim dependency. All domain types, configuration, prompt formatting, diff parsing, thread data model, persistence, and revision building live here. This crate is testable on any platform without a Neovim runtime.
+
+- `types` - Shared domain types (review status, thread status, backend ops)
+- `config` - Configuration deserialization with per-workspace overrides
+- `diff` - Unified diff parser, hunk extraction, and patch building
+- `threads` - Thread CRUD, anchoring, re-anchoring, filtering, and projection
+- `prompts` - Prompt formatting for reviews, replies, self-review, and rule extraction
+- `rules` - Scenario-scoped rule system with glob matching and TOML frontmatter
+- `state` - JSON persistence of review state, threads, and sessions
+- `revision` - Revision snapshot building and unified diff generation
+
+**`arbiter`** - cdylib plugin loaded by Neovim. Contains all UI code, nvim-oxi bindings, and process management. Depends on `arbiter-core` for domain logic.
+
+- `backend/` - CLI adapter shim (Cursor, Claude) with FIFO queue, streaming, and process lifecycle
+- `review/` - Review workbench: lifecycle, keymaps, navigation, hunk acceptance, thread UI, and revision view
 - `commands/` - User command registration and self-review orchestration
-- `prompt_panel.rs` - Long-lived prompt conversations in a floating window with named sessions
-- `panel.rs` - Shared rendering utilities (timestamps, streaming, status lines) used by thread and prompt panels
-- `dispatch.rs` - Safe cross-thread callback dispatch via `libuv::AsyncHandle`
-- `git.rs` - Async git operations (merge-base, diff, show, stash) and synchronous staging/unstaging
-- `state.rs` - JSON persistence of review state, threads, and sessions
-- `config.rs` - Configuration deserialization with per-workspace overrides
-- `rules.rs` - Scenario-scoped rule system with glob matching and TOML frontmatter
-- `file_panel/` - File panel trait and implementations (builtin tree, nvim-tree adapter)
-- `poll.rs` - Periodic file and file-list refresh via libuv timers
-- `activity.rs` - Backend busy/idle tracking for statusline display
-- `highlight.rs` - Custom highlight groups and sign definitions
+- `diff/render` - Diff buffer rendering and syntax highlighting
+- `file_panel/` - File panel implementations (builtin tree, nvim-tree adapter)
+- `prompt_panel` - Long-lived prompt conversations in a floating window
+- `panel` - Shared rendering utilities (timestamps, streaming, status lines)
+- `dispatch` - Safe cross-thread callback dispatch via `libuv::AsyncHandle`
+- `git` - Async git operations (merge-base, diff, show, stash) and staging/unstaging
+- `poll` - Periodic file and file-list refresh via libuv timers
+- `activity` - Backend busy/idle tracking for statusline display
+- `highlight` - Custom highlight groups and sign definitions

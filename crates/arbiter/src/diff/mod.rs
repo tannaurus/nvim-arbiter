@@ -1,13 +1,10 @@
 //! Diff parsing and rendering.
 //!
-//! Parses unified diff text into hunks, renders to Neovim buffers
-//! with thread summaries and highlighting. Uses `ThreadSummary` from
-//! `types.rs` (not `Thread` from threads) for stream decoupling.
+//! Parsing comes from `arbiter_core::diff`. Rendering uses Neovim buffers.
 
-mod parse;
 mod render;
 
-pub(crate) use parse::{
+pub(crate) use arbiter_core::diff::{
     buf_line_to_source, build_hunk_patch, detect_hunk_changes, parse_hunks, source_to_buf_line,
     synthesize_untracked, Hunk,
 };

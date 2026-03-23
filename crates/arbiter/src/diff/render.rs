@@ -9,8 +9,8 @@ use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::{self, Buffer, Window};
 use std::collections::{HashMap, HashSet};
 
-use super::parse::{self, Hunk};
 use crate::types::ThreadSummary;
+use arbiter_core::diff::{self as parse, Hunk};
 
 fn filetype_for_path(path: &str) -> &'static str {
     let ext = path.rsplit('.').next().unwrap_or("");
