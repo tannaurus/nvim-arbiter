@@ -50,6 +50,8 @@ thread_local! {
     static ACTIVE: RefCell<Option<Review>> = const { RefCell::new(None) };
     static SUMMARY_WIN: RefCell<Option<nvim_oxi::api::Window>> = const { RefCell::new(None) };
     static THREAD_LIST_WIN: RefCell<Option<nvim_oxi::api::Window>> = const { RefCell::new(None) };
+    static THREAD_LIST_BUF: RefCell<Option<nvim_oxi::api::Buffer>> = const { RefCell::new(None) };
+    static THREAD_LIST_STATE: RefCell<Option<Arc<std::sync::Mutex<thread_ui::ThreadListState>>>> = const { RefCell::new(None) };
 }
 
 fn safe_callback<F: FnOnce() + std::panic::UnwindSafe>(f: F) {
@@ -350,6 +352,7 @@ pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                 let mut buf = api::create_buf(false, true)?;
                 api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(buf.clone()).build())?;
                 api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(buf.clone()).build())?;
+                crate::panel::disable_syntax(&buf);
                 buf.set_name("[arbiter] files")?;
                 let mut win = file_panel_win.clone();
                 win.set_buf(&buf)?;
@@ -378,6 +381,7 @@ pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                     let mut buf = api::create_buf(false, true)?;
                     api::set_option_value("buftype", "nofile", &OptionOpts::builder().buffer(buf.clone()).build())?;
                     api::set_option_value("modifiable", false, &OptionOpts::builder().buffer(buf.clone()).build())?;
+                    crate::panel::disable_syntax(&buf);
                     buf.set_name("[arbiter] files")?;
                     let mut win = file_panel_win.clone();
                     win.set_buf(&buf)?;
@@ -562,7 +566,7 @@ pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
 
                     set_close_keymap(review.file_panel.buffer_mut());
                     set_close_keymap(&mut review.diff_panel.buf);
-                    set_file_panel_keymaps(review.file_panel.buffer_mut());
+                    set_file_panel_keymaps(review.file_panel.buffer_mut(), &review.config);
                     set_diff_panel_keymaps(&mut review.diff_panel.buf, &review.config);
 
                     if let Some(path) = &current_file {
@@ -574,8 +578,15 @@ pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
 
                     backend::set_on_item_started(Box::new(|tag: &str| {
                         if threads::window_thread_id().as_deref() == Some(tag) {
-                            let _ = threads::append_status("agent thinking...");
+                            let _ = threads::append_status_hl(
+                                "agent thinking...",
+                                Some("DiagnosticOk"),
+                            );
                         }
+                        refresh_thread_list();
+                    }));
+                    backend::set_on_queue_idle(Box::new(|| {
+                        refresh_thread_list();
                     }));
 
                     let tab_nr = review.tabpage.get_number().unwrap_or(0);
@@ -1045,7 +1056,7 @@ fn refresh_file_with_diff(
     let unmatched = threads::reanchor_by_content(&mut review.threads, path, &contents);
     for i in unmatched.into_iter().rev() {
         if let Some(t) = review.threads.get_mut(i) {
-            threads::bin(t);
+            threads::stale(t);
         }
     }
 

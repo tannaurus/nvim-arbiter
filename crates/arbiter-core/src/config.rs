@@ -357,8 +357,8 @@ pub struct KeymapConfig {
     pub list_threads_agent: String,
     /// List only user-created threads.
     pub list_threads_user: String,
-    /// List only resolved (binned) threads.
-    pub list_threads_binned: String,
+    /// List only stale threads (anchor lost).
+    pub list_threads_stale: String,
     /// List only open (unresolved) threads.
     pub list_threads_open: String,
     /// Resolve the thread at the cursor.
@@ -400,9 +400,9 @@ impl Default for KeymapConfig {
             list_threads: "<Leader>at".to_string(),
             list_threads_agent: "<Leader>ata".to_string(),
             list_threads_user: "<Leader>atu".to_string(),
-            list_threads_binned: "<Leader>atb".to_string(),
+            list_threads_stale: "<Leader>atb".to_string(),
             list_threads_open: "<Leader>ato".to_string(),
-            resolve_thread: "<Leader>aR".to_string(),
+            resolve_thread: "<Leader>ar".to_string(),
             toggle_resolved: "<Leader>a?".to_string(),
             re_anchor: "<Leader>aP".to_string(),
             refresh: "<Leader>aU".to_string(),

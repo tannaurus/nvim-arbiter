@@ -76,7 +76,7 @@ pub fn open(
     let mut buf = api::create_buf(false, true)?;
     let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
     api::set_option_value("buftype", "nofile", &buf_opts)?;
-    api::set_option_value("filetype", "markdown", &buf_opts)?;
+    panel::disable_syntax(&buf);
 
     let mut lines: Vec<String> = Vec::new();
     let mut highlights: Vec<(usize, &str)> = Vec::new();
@@ -302,7 +302,8 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
 ///
 /// If a status line already exists it is replaced. Automatically cleared
 /// when the first streaming chunk arrives via `append_streaming`.
-pub fn append_status(message: &str) -> nvim_oxi::Result<()> {
+/// `hl_group` controls the highlight; defaults to `"NonText"` when `None`.
+pub fn append_status_hl(message: &str, hl_group: Option<&str>) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
         let Some(buf) = guard.as_mut() else {
@@ -338,7 +339,8 @@ pub fn append_status(message: &str) -> nvim_oxi::Result<()> {
         } else {
             line_count
         };
-        let _ = buf.add_highlight(ns, "NonText", status_line, 0..);
+        let hl = hl_group.unwrap_or("NonText");
+        let _ = buf.add_highlight(ns, hl, status_line, 0..);
 
         scroll_to_bottom(buf);
         Ok(())

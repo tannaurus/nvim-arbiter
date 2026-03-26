@@ -33,8 +33,9 @@ pub enum ThreadStatus {
     Open,
     /// Thread has been resolved.
     Resolved,
-    /// Thread is orphaned (anchor not found) and moved to the bin.
-    Binned,
+    /// Thread is stale; its anchor line was lost.
+    #[serde(alias = "Binned")]
+    Stale,
 }
 
 impl std::fmt::Display for ThreadStatus {
@@ -42,7 +43,7 @@ impl std::fmt::Display for ThreadStatus {
         match self {
             ThreadStatus::Open => write!(f, "open"),
             ThreadStatus::Resolved => write!(f, "resolved"),
-            ThreadStatus::Binned => write!(f, "binned"),
+            ThreadStatus::Stale => write!(f, "stale"),
         }
     }
 }
@@ -197,7 +198,7 @@ mod tests {
     fn thread_status_display() {
         assert_eq!(ThreadStatus::Open.to_string(), "open");
         assert_eq!(ThreadStatus::Resolved.to_string(), "resolved");
-        assert_eq!(ThreadStatus::Binned.to_string(), "binned");
+        assert_eq!(ThreadStatus::Stale.to_string(), "stale");
     }
 
     #[test]
@@ -205,7 +206,7 @@ mod tests {
         for v in [
             ThreadStatus::Open,
             ThreadStatus::Resolved,
-            ThreadStatus::Binned,
+            ThreadStatus::Stale,
         ] {
             let j = serde_json::to_string(&v).unwrap();
             let r: ThreadStatus = serde_json::from_str(&j).unwrap();

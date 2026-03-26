@@ -58,16 +58,10 @@ fn open_panel(_title: &str) -> nvim_oxi::Result<()> {
 
     api::command(&format!("botright {PANEL_HEIGHT}split"))?;
     let mut buf = api::create_buf(false, true)?;
-    api::set_option_value(
-        "buftype",
-        "nofile",
-        &OptionOpts::builder().buffer(buf.clone()).build(),
-    )?;
-    api::set_option_value(
-        "modifiable",
-        true,
-        &OptionOpts::builder().buffer(buf.clone()).build(),
-    )?;
+    let buf_opts_rp = OptionOpts::builder().buffer(buf.clone()).build();
+    api::set_option_value("buftype", "nofile", &buf_opts_rp)?;
+    api::set_option_value("modifiable", true, &buf_opts_rp)?;
+    crate::panel::disable_syntax(&buf);
     buf.set_lines(0..0, false, ["── Agent Response ──"])?;
 
     let mut win = api::get_current_win();
@@ -88,16 +82,10 @@ fn open_panel(_title: &str) -> nvim_oxi::Result<()> {
 
 fn open_float(title: &str) -> nvim_oxi::Result<()> {
     let mut buf = api::create_buf(false, true)?;
-    api::set_option_value(
-        "buftype",
-        "nofile",
-        &OptionOpts::builder().buffer(buf.clone()).build(),
-    )?;
-    api::set_option_value(
-        "modifiable",
-        true,
-        &OptionOpts::builder().buffer(buf.clone()).build(),
-    )?;
+    let buf_opts_rf = OptionOpts::builder().buffer(buf.clone()).build();
+    api::set_option_value("buftype", "nofile", &buf_opts_rf)?;
+    api::set_option_value("modifiable", true, &buf_opts_rf)?;
+    crate::panel::disable_syntax(&buf);
     buf.set_lines(0..0, false, ["── Agent Response ──"])?;
 
     let cols = api::get_option_value::<i64>("columns", &OptionOpts::builder().build())?;

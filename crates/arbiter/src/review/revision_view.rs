@@ -114,6 +114,8 @@ fn enter_revision_view(review: &mut Review, thread_id: &str, rev_index: u32) {
     if let Some(path) = first_file {
         render_revision_file(review, &path);
     }
+
+    let _ = api::set_current_win(&review.diff_panel.win);
 }
 
 pub(super) fn exit_revision_view(review: &mut Review) {

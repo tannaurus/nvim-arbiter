@@ -1,8 +1,10 @@
 ---
-source: crates/arbiter/src/prompts.rs
-assertion_line: 888
+source: crates/arbiter-core/src/prompts.rs
+assertion_line: 932
 expression: output
 ---
+You are a code review assistant embedded in the reviewer's editor. The reviewer is commenting directly on code in their working tree. Address each comment by modifying the code or explaining your reasoning. Do not draft replies for an external platform.
+
 This is a code review of changes on the working branch compared against `develop`.
 
 Reviewer preferences (established during this review):

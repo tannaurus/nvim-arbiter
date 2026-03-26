@@ -348,18 +348,37 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
 
     api::create_user_command(
         "ArbiterSelfReview",
-        |_args: CommandArgs| {
+        |args: CommandArgs| {
             with_review_cmd(|r| {
                 let cwd = r.cwd.clone();
                 let ref_name = r.ref_name.clone();
                 let cfg = config::get();
-                let prompt_guidance = cfg.prompts.self_review.clone();
+                let user_context = args.fargs.join(" ");
+                let prompt_guidance = if user_context.is_empty() {
+                    cfg.prompts.self_review.clone()
+                } else {
+                    format!(
+                        "{}\n\nAdditional focus: {user_context}",
+                        cfg.prompts.self_review
+                    )
+                };
                 let is_cursor = matches!(cfg.backend, config::BackendKind::Cursor);
                 let project_rules_text = rules::format_for_prompt(&rules::resolve(
                     &r.project_rules,
                     rules::Scenario::SelfReview,
                     None,
                 ));
+                let view_context = if ref_name.is_empty() {
+                    "You are reviewing uncommitted working-tree changes (git diff). \
+                     Line numbers in the diff correspond to the current file on disk."
+                        .to_string()
+                } else {
+                    format!(
+                        "You are reviewing all changes on the current branch compared against \
+                         `{ref_name}` (git diff $(git merge-base {ref_name} HEAD)). \
+                         Line numbers reference the new (HEAD) side of the diff."
+                    )
+                };
                 git::diff_full(&cwd, &ref_name, move |result| {
                     let diff_text = if result.success() {
                         result.stdout
@@ -371,8 +390,11 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
                         );
                         return;
                     };
-                    let mut full_template =
-                        format!("{}{}", prompt_guidance, config::SELF_REVIEW_FORMAT_SUFFIX);
+                    let mut full_template = format!(
+                        "{view_context}\n\n{}{}",
+                        prompt_guidance,
+                        config::SELF_REVIEW_FORMAT_SUFFIX
+                    );
                     if !project_rules_text.is_empty() {
                         full_template = format!("{project_rules_text}\n{full_template}");
                     }
@@ -423,7 +445,7 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
             });
         },
         &CreateCommandOpts::builder()
-            .nargs(CommandNArgs::Zero)
+            .nargs(CommandNArgs::Any)
             .build(),
     )?;
 
@@ -614,6 +636,39 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
             .build(),
     )?;
 
+    api::create_user_command(
+        "ArbiterReset",
+        |_args: CommandArgs| {
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string());
+            let state_dir = config::get().state_dir();
+            let ws_hash = state::workspace_hash(Path::new(&cwd));
+            let ws_dir = state_dir.join(&ws_hash);
+            if ws_dir.exists() {
+                if let Err(e) = std::fs::remove_dir_all(&ws_dir) {
+                    let _ = api::notify(
+                        &format!("[arbiter] failed to remove state: {e}"),
+                        LogLevel::Error,
+                        &Dictionary::default(),
+                    );
+                    return;
+                }
+            }
+            if review::is_active() {
+                review::close();
+            }
+            let _ = api::notify(
+                "[arbiter] workspace state cleared",
+                LogLevel::Info,
+                &Dictionary::default(),
+            );
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::Zero)
+            .build(),
+    )?;
+
     Ok(())
 }
 
@@ -663,7 +718,7 @@ fn open_rules_window(r: &mut review::Review) {
     };
     let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
     let _ = api::set_option_value("buftype", "acwrite", &buf_opts);
-    let _ = api::set_option_value("filetype", "markdown", &buf_opts);
+    crate::panel::disable_syntax(&buf);
 
     let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
     if !refs.is_empty() {

@@ -5,7 +5,8 @@
 
 use crate::config::{self, DiffStyle};
 use crate::types::{ThreadOrigin, ThreadStatus};
-use nvim_oxi::api::opts::OptionOpts;
+use nvim_oxi::api::opts::{OptionOpts, SetExtmarkOpts};
+use nvim_oxi::api::types::ExtmarkHlMode;
 use nvim_oxi::api::{self, Buffer, Window};
 use std::collections::{HashMap, HashSet};
 
@@ -252,19 +253,33 @@ pub(crate) fn apply_highlights(
     let style = config::get().review.diff_style;
 
     let mut line_idx = 0;
-    buf.add_highlight(ns, "ArbiterDiffFile", line_idx, 0..)?;
+    let replace_opts = |hl: &str| {
+        SetExtmarkOpts::builder()
+            .end_col(0)
+            .end_row(line_idx + 1)
+            .hl_group(hl)
+            .hl_mode(ExtmarkHlMode::Replace)
+            .build()
+    };
+    let _ = buf.set_extmark(ns, line_idx, 0, &replace_opts("ArbiterDiffFile"));
     line_idx += 1;
 
     for s in summaries {
-        let hl = match s.origin {
-            ThreadOrigin::User => "ArbiterThreadUser",
-            ThreadOrigin::Agent => "ArbiterThreadAgent",
-        };
-        if s.status == ThreadStatus::Resolved {
-            buf.add_highlight(ns, "ArbiterThreadResolved", line_idx, 0..)?;
+        let hl = if s.status == ThreadStatus::Resolved {
+            "ArbiterThreadResolved"
         } else {
-            buf.add_highlight(ns, hl, line_idx, 0..)?;
-        }
+            match s.origin {
+                ThreadOrigin::User => "ArbiterThreadUser",
+                ThreadOrigin::Agent => "ArbiterThreadAgent",
+            }
+        };
+        let opts = SetExtmarkOpts::builder()
+            .end_col(0)
+            .end_row(line_idx + 1)
+            .hl_group(hl)
+            .hl_mode(ExtmarkHlMode::Replace)
+            .build();
+        let _ = buf.set_extmark(ns, line_idx, 0, &opts);
         line_idx += 1;
     }
 

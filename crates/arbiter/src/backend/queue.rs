@@ -15,11 +15,20 @@ static ADAPTER: Mutex<Option<Arc<dyn Adapter + Send + Sync>>> = Mutex::new(None)
 type OnStarted = Box<dyn Fn(&str) + Send + Sync>;
 static ON_ITEM_STARTED: Mutex<Option<OnStarted>> = Mutex::new(None);
 
+type OnIdle = Box<dyn Fn() + Send + Sync>;
+static ON_QUEUE_IDLE: Mutex<Option<OnIdle>> = Mutex::new(None);
+
 /// Registers a callback invoked on the main thread when a tagged item
 /// starts processing (transitions from queued to in-flight). The callback
 /// receives the item's tag.
 pub(super) fn set_on_item_started(cb: OnStarted) {
     *ON_ITEM_STARTED.lock().expect("on_started lock") = Some(cb);
+}
+
+/// Registers a callback invoked when the queue drains and no more items
+/// are in-flight. Used to clear activity indicators in the UI.
+pub(super) fn set_on_queue_idle(cb: OnIdle) {
+    *ON_QUEUE_IDLE.lock().expect("on_idle lock") = Some(cb);
 }
 
 /// Stores the adapter. Overwrites any previous adapter (allows test injection).
@@ -135,6 +144,9 @@ fn process_next() {
             *INFLIGHT_TAG.lock().expect("inflight_tag lock") = None;
             PROCESSING.store(false, Ordering::SeqCst);
             crate::activity::set_busy(false);
+            if let Some(cb) = ON_QUEUE_IDLE.lock().expect("on_idle lock").as_ref() {
+                cb();
+            }
         }
     }
 }

@@ -67,7 +67,7 @@ pub(crate) fn open(conversation_id: &str) -> nvim_oxi::Result<()> {
     let mut buf = api::create_buf(false, true)?;
     let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
     api::set_option_value("buftype", "nofile", &buf_opts)?;
-    api::set_option_value("filetype", "markdown", &buf_opts)?;
+    crate::panel::disable_syntax(&buf);
 
     let mut lines: Vec<String> = Vec::new();
     let mut highlights: Vec<(usize, &str)> = Vec::new();

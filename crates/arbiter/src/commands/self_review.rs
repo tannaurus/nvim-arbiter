@@ -22,6 +22,7 @@ pub(super) fn show_apply_confirmation(items: Vec<(String, u32, String)>) {
     };
     let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
     let _ = api::set_option_value("buftype", "nofile", &buf_opts);
+    crate::panel::disable_syntax(&buf);
     let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
     let _ = buf.set_lines(0..0, false, refs);
     let _ = api::set_option_value("modifiable", false, &buf_opts);

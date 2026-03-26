@@ -11,7 +11,122 @@ pub(super) fn set_close_keymap(buf: &mut nvim_oxi::api::Buffer) {
     let _ = buf.set_keymap(Mode::Normal, "q", "", &opts);
 }
 
-pub(super) fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer) {
+fn set_thread_list_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Config) {
+    let list_threads = config.keymaps.list_threads.clone();
+    let list_threads_agent = config.keymaps.list_threads_agent.clone();
+    let list_threads_user = config.keymaps.list_threads_user.clone();
+    let list_threads_stale = config.keymaps.list_threads_stale.clone();
+    let list_threads_open = config.keymaps.list_threads_open.clone();
+
+    let opts_list_threads = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(handle_list_threads);
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, &list_threads, "", &opts_list_threads);
+
+    let opts_list_threads_agent = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(|r| {
+                handle_list_threads_filtered(
+                    r,
+                    threads::FilterOpts {
+                        origin: Some(ThreadOrigin::Agent),
+                        status: None,
+                    },
+                );
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(
+        Mode::Normal,
+        &list_threads_agent,
+        "",
+        &opts_list_threads_agent,
+    );
+
+    let opts_list_threads_user = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(|r| {
+                handle_list_threads_filtered(
+                    r,
+                    threads::FilterOpts {
+                        origin: Some(ThreadOrigin::User),
+                        status: None,
+                    },
+                );
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(
+        Mode::Normal,
+        &list_threads_user,
+        "",
+        &opts_list_threads_user,
+    );
+
+    let opts_list_threads_stale = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(|r| {
+                handle_list_threads_filtered(
+                    r,
+                    threads::FilterOpts {
+                        origin: None,
+                        status: Some(ThreadStatus::Stale),
+                    },
+                );
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(
+        Mode::Normal,
+        &list_threads_stale,
+        "",
+        &opts_list_threads_stale,
+    );
+
+    let opts_list_threads_open = SetKeymapOpts::builder()
+        .callback(|_| {
+            with_active(|r| {
+                handle_list_threads_filtered(
+                    r,
+                    threads::FilterOpts {
+                        origin: None,
+                        status: Some(ThreadStatus::Open),
+                    },
+                );
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .nowait(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(
+        Mode::Normal,
+        &list_threads_open,
+        "",
+        &opts_list_threads_open,
+    );
+}
+
+pub(super) fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Config) {
     let opts = SetKeymapOpts::builder()
         .callback(|_| {
             with_active(|review| {
@@ -42,6 +157,7 @@ pub(super) fn set_file_panel_keymaps(buf: &mut nvim_oxi::api::Buffer) {
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, "<CR>", "", &opts);
+    set_thread_list_keymaps(buf, config);
 }
 
 pub(super) fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &config::Config) {
@@ -57,11 +173,6 @@ pub(super) fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &c
     let comment = config.keymaps.comment.clone();
     let auto_resolve = config.keymaps.auto_resolve.clone();
     let open_thread = config.keymaps.open_thread.clone();
-    let list_threads = config.keymaps.list_threads.clone();
-    let list_threads_agent = config.keymaps.list_threads_agent.clone();
-    let list_threads_user = config.keymaps.list_threads_user.clone();
-    let list_threads_binned = config.keymaps.list_threads_binned.clone();
-    let list_threads_open = config.keymaps.list_threads_open.clone();
     let resolve_thread = config.keymaps.resolve_thread.clone();
     let toggle_resolved = config.keymaps.toggle_resolved.clone();
     let re_anchor = config.keymaps.re_anchor.clone();
@@ -249,88 +360,7 @@ pub(super) fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &c
         .build();
     let _ = buf.set_keymap(Mode::Normal, &open_thread, "", &opts_open_thread);
 
-    let opts_list_threads = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(handle_list_threads);
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(Mode::Normal, &list_threads, "", &opts_list_threads);
-
-    let opts_list_threads_agent = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(|r| {
-                handle_list_threads_filtered(
-                    r,
-                    threads::FilterOpts {
-                        origin: Some(ThreadOrigin::Agent),
-                        status: None,
-                    },
-                );
-            });
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(
-        Mode::Normal,
-        &list_threads_agent,
-        "",
-        &opts_list_threads_agent,
-    );
-
-    let opts_list_threads_user = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(|r| {
-                handle_list_threads_filtered(
-                    r,
-                    threads::FilterOpts {
-                        origin: Some(ThreadOrigin::User),
-                        status: None,
-                    },
-                );
-            });
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(
-        Mode::Normal,
-        &list_threads_user,
-        "",
-        &opts_list_threads_user,
-    );
-
-    let opts_list_threads_binned = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(|r| {
-                handle_list_threads_filtered(
-                    r,
-                    threads::FilterOpts {
-                        origin: None,
-                        status: Some(ThreadStatus::Binned),
-                    },
-                );
-            });
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(
-        Mode::Normal,
-        &list_threads_binned,
-        "",
-        &opts_list_threads_binned,
-    );
+    set_thread_list_keymaps(buf, config);
 
     let opts_resolve_thread = SetKeymapOpts::builder()
         .callback(|_| {
@@ -386,30 +416,6 @@ pub(super) fn set_diff_panel_keymaps(buf: &mut nvim_oxi::api::Buffer, config: &c
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, &prev_thread, "", &opts_prev_thread);
-
-    let opts_list_threads_open = SetKeymapOpts::builder()
-        .callback(|_| {
-            with_active(|r| {
-                handle_list_threads_filtered(
-                    r,
-                    threads::FilterOpts {
-                        origin: None,
-                        status: Some(ThreadStatus::Open),
-                    },
-                );
-            });
-            Ok::<(), nvim_oxi::Error>(())
-        })
-        .noremap(true)
-        .nowait(true)
-        .silent(true)
-        .build();
-    let _ = buf.set_keymap(
-        Mode::Normal,
-        &list_threads_open,
-        "",
-        &opts_list_threads_open,
-    );
 
     let opts_next_unreviewed = SetKeymapOpts::builder()
         .callback(|_| {

@@ -78,6 +78,7 @@ fn open_impl(
     api::command("setlocal bufhidden=wipe")?;
     api::command("setlocal noswapfile")?;
     api::command("setlocal modifiable")?;
+    crate::panel::disable_syntax(&buf);
 
     let win_opts = OptionOpts::builder().win(win.clone()).build();
     let _ = api::set_option_value("number", false, &win_opts);

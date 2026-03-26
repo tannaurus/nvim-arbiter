@@ -69,7 +69,7 @@ For simple requests like "rename this variable" or "add a docstring here", use `
 
 ### Agent self-review
 
-Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus.
+Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus. You can pass an optional prompt to steer what the agent focuses on, e.g. `:ArbiterSelfReview check error handling and edge cases`.
 
 To have the agent act on all its own feedback at once, run `:ArbiterApply`. This bundles every open self-review thread into a single prompt telling the agent to fix them all. Each thread is marked as auto-resolve, so they'll close automatically once the agent applies the changes.
 
@@ -371,9 +371,9 @@ require("arbiter").setup({
     list_threads = "<Leader>at",  -- Thread list popup (grouped by status)
     list_threads_agent = "<Leader>ata", -- Thread list (agent threads only)
     list_threads_user = "<Leader>atu",  -- Thread list (user threads only)
-    list_threads_binned = "<Leader>atb", -- Thread list (binned only)
+    list_threads_stale = "<Leader>atb", -- Thread list (stale only)
     list_threads_open = "<Leader>ato",   -- Thread list (open only)
-    resolve_thread = "<Leader>aR",       -- Resolve/reopen thread at cursor
+    resolve_thread = "<Leader>ar",       -- Resolve/reopen thread at cursor
     toggle_resolved = "<Leader>a?",      -- Toggle display of resolved threads
     re_anchor = "<Leader>aP",     -- Re-anchor thread to current cursor line
     refresh = "<Leader>aU",       -- Refresh file list and current diff
@@ -486,6 +486,7 @@ Project rules are the opposite: written ahead of time, versioned in your repo, a
 | `:ArbiterRules` | Open an editable popup showing all active rules (learned + project). `:w` saves, `q` closes. |
 | `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
 | `:ArbiterReloadRules` | Re-read project rule files from disk and report the count. Useful after adding or editing rule files without restarting the review. |
+| `:ArbiterReset` | Delete all persisted state (threads, review status, sessions) for the current workspace and close the review. |
 
 ### Backend permissions
 
@@ -527,7 +528,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterPrompt [name]` | Toggle the prompt panel. Opens a floating conversation window. Without an argument, opens the default "main" conversation. With a name (may be multiple words), opens or switches to that named conversation. Each conversation maintains independent message history and backend session. |
 | `:ArbiterRef [branch]` | Change the comparison branch on the fly. No argument clears the base. |
 | `:ArbiterActiveThread` | Open the thread window for the agent that is currently thinking. |
-| `:ArbiterSelfReview` | Run agent self-review on the current diff. Creates agent threads. |
+| `:ArbiterSelfReview [prompt]` | Run agent self-review on the current diff. Creates agent threads. Optional prompt steers focus. |
 | `:ArbiterApply` | Send all open self-review feedback to the agent in a single prompt. Marks each thread as auto-resolve so they close once the agent applies the changes. |
 | `:ArbiterRefresh` | Refresh the file list and current file diff. |
 | `:ArbiterOpenThread <file> <line>` | Open the thread at the given file and line number. |
@@ -536,6 +537,7 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterRules` | Open an editable popup with the current review rules. `:w` saves, `q` closes. |
 | `:ArbiterToggleRules` | Toggle automatic rule extraction on agent responses. |
 | `:ArbiterReloadRules` | Re-read project rule files from disk and report the count. |
+| `:ArbiterReset` | Delete all persisted state for the current workspace and close the review. |
 
 ## Keybindings
 
@@ -570,7 +572,7 @@ All keybindings are active in the review workbench tabpage and are fully configu
 | `<Leader>at` | Open thread list popup (grouped by status). |
 | `<Leader>ata` | Open thread list filtered to agent-created threads. |
 | `<Leader>atu` | Open thread list filtered to user-created threads. |
-| `<Leader>atb` | Open thread list filtered to binned threads. |
+| `<Leader>atb` | Open thread list filtered to stale threads (anchor lost). |
 | `<Leader>ato` | Open thread list filtered to open threads. |
 | `<Leader>aR` | Resolve the thread at the cursor. |
 | `<Leader>a?` | Toggle display of resolved threads. |
@@ -600,7 +602,7 @@ When the thread list popup is open (via `<Leader>at` and variants):
 | Key | Action |
 |-----|--------|
 | `<CR>` | Navigate to the thread's file/line and open the thread window. |
-| `dd` | Resolve the thread (Open/Binned) or permanently delete it (Resolved). |
+| `dd` | Resolve the thread (Open/Stale) or permanently delete it (Resolved). |
 | `q` / `Esc` | Close the popup. |
 
 ### Comment input float

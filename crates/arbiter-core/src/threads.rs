@@ -196,12 +196,12 @@ pub fn resolve(thread: &mut Thread) {
     thread.status = ThreadStatus::Resolved;
 }
 
-/// Sets thread status to Binned (anchor lost).
-pub fn bin(thread: &mut Thread) {
-    thread.status = ThreadStatus::Binned;
+/// Sets thread status to Stale (anchor lost).
+pub fn stale(thread: &mut Thread) {
+    thread.status = ThreadStatus::Stale;
 }
 
-/// Resolves all open threads; ignores Resolved and Binned.
+/// Resolves all open threads; ignores Resolved and Stale.
 pub fn resolve_all(threads: &mut [Thread]) {
     for t in threads.iter_mut() {
         if t.status == ThreadStatus::Open {
@@ -413,10 +413,10 @@ mod tests {
     }
 
     #[test]
-    fn bin_sets_status() {
+    fn stale_sets_status() {
         let mut t = create("f.rs", 1, "hi", CreateOpts::default());
-        bin(&mut t);
-        assert_eq!(t.status, ThreadStatus::Binned);
+        stale(&mut t);
+        assert_eq!(t.status, ThreadStatus::Stale);
     }
 
     #[test]

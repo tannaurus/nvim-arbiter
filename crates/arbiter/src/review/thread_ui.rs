@@ -100,10 +100,16 @@ fn make_thread_reply_callback(
                         let paths: Vec<String> =
                             r.files.iter().map(|(p, _, _)| p.clone()).collect();
                         std::thread::spawn(move || {
+                            let mut all_paths = paths;
+                            for dp in revision::diff_names_sync(&cwd, &ref_name) {
+                                if !all_paths.contains(&dp) {
+                                    all_paths.push(dp);
+                                }
+                            }
                             let snap = (
                                 cwd.clone(),
                                 ref_name.clone(),
-                                revision::snapshot_files(&cwd, &paths),
+                                revision::snapshot_files(&cwd, &all_paths),
                             );
                             if let Ok(mut guard) = snap_cell.lock() {
                                 *guard = Some(snap);
@@ -285,7 +291,7 @@ fn clear_thread_anchor() {
     let ns = api::create_namespace("arbiter-thread-anchor");
     with_active(|r| {
         let mut buf = r.diff_panel.buf.clone();
-        let _ = buf.clear_namespace(ns, ..);
+        let _ = buf.clear_namespace(ns, 0..usize::MAX);
     });
 }
 
@@ -576,10 +582,16 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                 })
                 .unwrap_or_default();
                 std::thread::spawn(move || {
+                    let mut all_paths = paths;
+                    for dp in revision::diff_names_sync(&cwd, &ref_name) {
+                        if !all_paths.contains(&dp) {
+                            all_paths.push(dp);
+                        }
+                    }
                     let snap = (
                         cwd.clone(),
                         ref_name.clone(),
-                        revision::snapshot_files(&cwd, &paths),
+                        revision::snapshot_files(&cwd, &all_paths),
                     );
                     if let Ok(mut guard) = snap_cell.lock() {
                         *guard = Some(snap);
@@ -649,9 +661,9 @@ pub(super) fn handle_list_threads(review: &mut Review) {
     handle_list_threads_filtered(review, threads::FilterOpts::default());
 }
 
-struct ThreadListState {
-    line_map: Vec<Option<(String, ThreadStatus)>>,
-    filter: threads::FilterOpts,
+pub(super) struct ThreadListState {
+    pub(super) line_map: Vec<Option<(String, ThreadStatus)>>,
+    pub(super) filter: threads::FilterOpts,
 }
 
 pub(super) fn close_thread_list_win() {
@@ -660,6 +672,8 @@ pub(super) fn close_thread_list_win() {
             let _ = w.close(false);
         }
     });
+    THREAD_LIST_BUF.with(|c| c.borrow_mut().take());
+    THREAD_LIST_STATE.with(|c| c.borrow_mut().take());
 }
 
 pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::FilterOpts) {
@@ -686,6 +700,7 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
     };
     let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
     let _ = api::set_option_value("buftype", "nofile", &buf_opts);
+    crate::panel::disable_syntax(&buf);
     let refs: Vec<&str> = content.lines.iter().map(|s| s.as_str()).collect();
     let _ = buf.set_lines(0..0, false, refs);
     let _ = api::set_option_value("modifiable", false, &buf_opts);
@@ -704,7 +719,7 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
         (Some(ThreadOrigin::Agent), _) => " Agent Threads ",
         (Some(ThreadOrigin::User), _) => " User Threads ",
         (_, Some(ThreadStatus::Open)) => " Open Threads ",
-        (_, Some(ThreadStatus::Binned)) => " Binned Threads ",
+        (_, Some(ThreadStatus::Stale)) => " Stale Threads ",
         (_, Some(ThreadStatus::Resolved)) => " Resolved Threads ",
         _ => " Threads ",
     };
@@ -739,44 +754,32 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
     let _ = win.set_cursor(first_entry, 0);
 
     THREAD_LIST_WIN.with(|c| *c.borrow_mut() = Some(win.clone()));
+    THREAD_LIST_BUF.with(|c| *c.borrow_mut() = Some(buf.clone()));
 
     let state = Arc::new(std::sync::Mutex::new(ThreadListState {
         line_map: content.line_map,
         filter: opts,
     }));
-    let win_cell = Arc::new(std::sync::Mutex::new(Some(win)));
+    THREAD_LIST_STATE.with(|c| *c.borrow_mut() = Some(state.clone()));
 
-    let q_win = win_cell.clone();
     let opts_q = SetKeymapOpts::builder()
         .callback(move |_| {
-            if let Ok(mut g) = q_win.lock() {
-                if let Some(w) = g.take() {
-                    let _ = w.close(false);
-                }
-            }
-            THREAD_LIST_WIN.with(|c| c.borrow_mut().take());
+            close_thread_list_win();
         })
         .noremap(true)
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, "q", "", &opts_q);
 
-    let esc_win = win_cell.clone();
     let opts_esc = SetKeymapOpts::builder()
         .callback(move |_| {
-            if let Ok(mut g) = esc_win.lock() {
-                if let Some(w) = g.take() {
-                    let _ = w.close(false);
-                }
-            }
-            THREAD_LIST_WIN.with(|c| c.borrow_mut().take());
+            close_thread_list_win();
         })
         .noremap(true)
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, "<Esc>", "", &opts_esc);
 
-    let cr_win = win_cell.clone();
     let cr_state = state.clone();
     let opts_cr = SetKeymapOpts::builder()
         .callback(move |_| {
@@ -791,12 +794,7 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
             let Some((tid, _)) = entry else {
                 return Ok::<(), nvim_oxi::Error>(());
             };
-            if let Ok(mut g) = cr_win.lock() {
-                if let Some(w) = g.take() {
-                    let _ = w.close(false);
-                }
-            }
-            THREAD_LIST_WIN.with(|c| c.borrow_mut().take());
+            close_thread_list_win();
             with_active(|r| {
                 r.pending_thread_open = Some(tid);
                 if let Some(file) = r
@@ -817,7 +815,6 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
 
     let dd_buf = buf.clone();
     let dd_state = state.clone();
-    let dd_win = win_cell;
     let opts_dd = SetKeymapOpts::builder()
         .callback(move |_| {
             let (cursor_row, _) = api::get_current_win().get_cursor().ok().unwrap_or((1, 0));
@@ -834,7 +831,7 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
             };
             with_active(|r| {
                 match status {
-                    ThreadStatus::Open | ThreadStatus::Binned => {
+                    ThreadStatus::Open | ThreadStatus::Stale => {
                         if let Some(t) = r.threads.iter_mut().find(|t| t.id == tid) {
                             threads::resolve(t);
                         }
@@ -849,22 +846,11 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
 
                 let filtered = threads::filter(&r.threads, &filter);
                 if filtered.is_empty() {
-                    if let Ok(mut g) = dd_win.lock() {
-                        if let Some(w) = g.take() {
-                            let _ = w.close(false);
-                        }
-                    }
-                    THREAD_LIST_WIN.with(|c| c.borrow_mut().take());
+                    close_thread_list_win();
                 } else {
                     let new_content = build_thread_list_lines(&filtered);
                     let mut b = dd_buf.clone();
-                    let bo = OptionOpts::builder().buffer(b.clone()).build();
-                    let _ = api::set_option_value("modifiable", true, &bo);
-                    let lc = b.line_count().unwrap_or(0);
-                    let refs: Vec<&str> = new_content.lines.iter().map(|s| s.as_str()).collect();
-                    let _ = b.set_lines(0..lc, false, refs);
-                    let _ = api::set_option_value("modifiable", false, &bo);
-                    apply_thread_list_highlights(&mut b, &new_content.highlights);
+                    update_thread_list_buf(&mut b, &new_content);
 
                     if let Ok(mut guard) = dd_state.lock() {
                         guard.line_map = new_content.line_map;
@@ -881,6 +867,52 @@ pub(super) fn handle_list_threads_filtered(review: &mut Review, opts: threads::F
         .silent(true)
         .build();
     let _ = buf.set_keymap(Mode::Normal, "dd", "", &opts_dd);
+
+    let ra_buf = buf.clone();
+    let ra_state = state.clone();
+    let opts_resolve_all = SetKeymapOpts::builder()
+        .callback(move |_| {
+            let filter = {
+                let Ok(guard) = ra_state.lock() else {
+                    return Ok::<(), nvim_oxi::Error>(());
+                };
+                guard.filter.clone()
+            };
+            with_active(|r| {
+                let to_resolve: Vec<String> = threads::filter(&r.threads, &filter)
+                    .iter()
+                    .filter(|t| matches!(t.status, ThreadStatus::Open | ThreadStatus::Stale))
+                    .map(|t| t.id.clone())
+                    .collect();
+                for t in r.threads.iter_mut() {
+                    if to_resolve.contains(&t.id) {
+                        threads::resolve(t);
+                    }
+                }
+                save_threads(r);
+
+                let filtered = threads::filter(&r.threads, &filter);
+                if filtered.is_empty() {
+                    close_thread_list_win();
+                } else {
+                    let new_content = build_thread_list_lines(&filtered);
+                    let mut b = ra_buf.clone();
+                    update_thread_list_buf(&mut b, &new_content);
+                    if let Ok(mut guard) = ra_state.lock() {
+                        guard.line_map = new_content.line_map;
+                    }
+                }
+
+                if let Some(p) = r.current_file.clone() {
+                    select_file_impl(r, &p);
+                }
+            });
+            Ok::<(), nvim_oxi::Error>(())
+        })
+        .noremap(true)
+        .silent(true)
+        .build();
+    let _ = buf.set_keymap(Mode::Normal, "<Leader>aa", "", &opts_resolve_all);
 }
 
 struct ThreadListContent {
@@ -890,18 +922,19 @@ struct ThreadListContent {
 }
 
 fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
+    let inflight = backend::inflight_tag();
     let mut lines = Vec::new();
     let mut line_map: Vec<Option<(String, ThreadStatus)>> = Vec::new();
     let mut highlights: Vec<(usize, &'static str)> = Vec::new();
 
     let mut open: Vec<&threads::Thread> = Vec::new();
-    let mut binned: Vec<&threads::Thread> = Vec::new();
+    let mut stale: Vec<&threads::Thread> = Vec::new();
     let mut resolved: Vec<&threads::Thread> = Vec::new();
 
     for t in threads {
         match t.status {
             ThreadStatus::Open => open.push(t),
-            ThreadStatus::Binned => binned.push(t),
+            ThreadStatus::Stale => stale.push(t),
             ThreadStatus::Resolved => resolved.push(t),
         }
     }
@@ -910,12 +943,12 @@ fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
     let sort_newest_first =
         |a: &&threads::Thread, b: &&threads::Thread| created_ts(b).cmp(&created_ts(a));
     open.sort_by(sort_newest_first);
-    binned.sort_by(sort_newest_first);
+    stale.sort_by(sort_newest_first);
     resolved.sort_by(sort_newest_first);
 
     let sections: [(&str, &str, &[&threads::Thread]); 3] = [
         ("● Open", "DiagnosticInfo", &open),
-        ("✗ Binned", "DiagnosticWarn", &binned),
+        ("✗ Stale", "DiagnosticWarn", &stale),
         ("✓ Resolved", "Comment", &resolved),
     ];
 
@@ -947,7 +980,28 @@ fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
                         .replace('\n', " ")
                 })
                 .unwrap_or_default();
-            lines.push(format!("    {}:{}  {}", t.file, t.line, preview));
+            let is_inflight = inflight.as_deref() == Some(&t.id);
+            let queue_pos = if is_inflight {
+                None
+            } else {
+                backend::queue_position(&t.id)
+            };
+            let activity = if is_inflight {
+                " ◐ thinking"
+            } else {
+                match queue_pos {
+                    Some(0) => " ◌ next",
+                    Some(_) => " ◌ queued",
+                    None => "",
+                }
+            };
+            let line_idx = lines.len();
+            if is_inflight {
+                highlights.push((line_idx, "DiagnosticOk"));
+            } else if queue_pos.is_some() {
+                highlights.push((line_idx, "DiagnosticHint"));
+            }
+            lines.push(format!("    {}:{}  {}{activity}", t.file, t.line, preview));
             line_map.push(Some((t.id.clone(), t.status)));
         }
     }
@@ -959,22 +1013,69 @@ fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
     }
 }
 
+fn update_thread_list_buf(buf: &mut nvim_oxi::api::Buffer, content: &ThreadListContent) {
+    let bo = OptionOpts::builder().buffer(buf.clone()).build();
+    let _ = api::set_option_value("modifiable", true, &bo);
+    let lc = buf.line_count().unwrap_or(0);
+    let refs: Vec<&str> = content.lines.iter().map(|s| s.as_str()).collect();
+    let _ = buf.set_lines(0..lc, false, refs);
+    let _ = api::set_option_value("modifiable", false, &bo);
+    apply_thread_list_highlights(buf, &content.highlights);
+}
+
 fn apply_thread_list_highlights(buf: &mut nvim_oxi::api::Buffer, highlights: &[(usize, &str)]) {
     let ns = api::create_namespace("arbiter-thread-list");
+    let _ = buf.clear_namespace(ns, 0..usize::MAX);
     for &(line, hl_group) in highlights {
         let _ = buf.add_highlight(ns, hl_group, line, 0..);
     }
+}
+
+/// Refreshes the thread list popup content if it is currently open.
+/// Called when the active thread changes (request starts or queue drains).
+pub(super) fn refresh_thread_list() {
+    let win_valid =
+        THREAD_LIST_WIN.with(|c| c.borrow().as_ref().map(|w| w.is_valid()).unwrap_or(false));
+    if !win_valid {
+        return;
+    }
+    let state_arc = THREAD_LIST_STATE.with(|c| c.borrow().clone());
+    let Some(state_arc) = state_arc else {
+        return;
+    };
+    let filter = {
+        let Ok(guard) = state_arc.lock() else {
+            return;
+        };
+        guard.filter.clone()
+    };
+    with_active(|r| {
+        let filtered = threads::filter(&r.threads, &filter);
+        if filtered.is_empty() {
+            close_thread_list_win();
+            return;
+        }
+        let new_content = build_thread_list_lines(&filtered);
+        THREAD_LIST_BUF.with(|c| {
+            if let Some(buf) = c.borrow_mut().as_mut() {
+                update_thread_list_buf(buf, &new_content);
+            }
+        });
+        if let Ok(mut guard) = state_arc.lock() {
+            guard.line_map = new_content.line_map;
+        }
+    });
 }
 
 fn show_thread_queue_status(tid: &str) {
     if threads::window_thread_id().as_deref() != Some(tid) {
         return;
     }
-    let msg = match backend::queue_position(tid) {
-        Some(pos) => format!("queued ({} ahead)", pos + 1),
-        None => "agent thinking...".to_string(),
+    let (msg, hl) = match backend::queue_position(tid) {
+        Some(pos) => (format!("queued ({} ahead)", pos + 1), "DiagnosticHint"),
+        None => ("agent thinking...".to_string(), "DiagnosticOk"),
     };
-    let _ = threads::append_status(&msg);
+    let _ = threads::append_status_hl(&msg, Some(hl));
 }
 
 pub(super) fn handle_resolve_thread(review: &mut Review) {

@@ -326,7 +326,12 @@ pub fn parse_similarity_response(text: &str) -> Vec<Vec<usize>> {
 }
 
 fn format_review_preamble(ctx: &ReviewContext<'_>, file: &str) -> String {
-    let mut out = String::new();
+    let mut out = String::from(
+        "You are a code review assistant embedded in the reviewer's editor. \
+         The reviewer is commenting directly on code in their working tree. \
+         Address each comment by modifying the code or explaining your reasoning. \
+         Do not draft replies for an external platform.\n\n",
+    );
 
     if !ctx.ref_name.is_empty() {
         out.push_str(&format!(
@@ -526,9 +531,11 @@ mod tests {
     }
 
     #[test]
-    fn preamble_empty_when_no_context() {
+    fn preamble_contains_role_when_no_context() {
         let ctx = empty_ctx();
-        assert!(format_review_preamble(&ctx, "a.rs").is_empty());
+        let p = format_review_preamble(&ctx, "a.rs");
+        assert!(p.contains("code review assistant"));
+        assert!(!p.contains("compared against"));
     }
 
     #[test]
@@ -602,10 +609,12 @@ mod tests {
     }
 
     #[test]
-    fn comment_prompt_no_context_no_preamble() {
+    fn comment_prompt_includes_role_preamble() {
         let ctx = empty_ctx();
         let prompt = format_comment_prompt("a.rs", 5, "fix", "let x = 1;", &[], &ctx);
-        assert!(prompt.starts_with("File: a.rs"));
+        assert!(prompt.contains("code review assistant"));
+        assert!(prompt.contains("File: a.rs"));
+        assert!(prompt.contains("Comment: fix"));
     }
 
     #[test]

@@ -48,6 +48,12 @@ pub(crate) fn set_on_item_started(cb: Box<dyn Fn(&str) + Send + Sync>) {
     queue::set_on_item_started(cb);
 }
 
+/// Registers a callback invoked when the queue drains and no items remain
+/// in-flight. Used to clear activity indicators in the thread list popup.
+pub(crate) fn set_on_queue_idle(cb: Box<dyn Fn() + Send + Sync>) {
+    queue::set_on_queue_idle(cb);
+}
+
 /// Initializes the backend. Stores config and selects adapter.
 ///
 /// For E3-1, uses a no-op adapter until E3-2 provides real implementations.

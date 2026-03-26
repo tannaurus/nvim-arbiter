@@ -8,6 +8,17 @@ use nvim_oxi::api::{self, Buffer};
 pub(crate) const SEPARATOR: &str = "  ────────────────────────────────";
 pub(crate) const STATUS_PREFIX: &str = "  ⏳ ";
 
+/// Disables all syntax highlighting on a buffer: legacy syntax, filetype
+/// detection, and treesitter. Call after `create_buf` and before the buffer
+/// is displayed in a window.
+pub(crate) fn disable_syntax(buf: &Buffer) {
+    let opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let _ = api::set_option_value("filetype", "", &opts);
+    let _ = api::set_option_value("syntax", "", &opts);
+    let handle = buf.handle();
+    let _ = api::command(&format!("lua pcall(vim.treesitter.stop, {handle})"));
+}
+
 pub(crate) fn format_ts(ts: i64) -> String {
     if ts == 0 {
         return String::new();
