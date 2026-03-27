@@ -1,6 +1,6 @@
 [package]
 name = "arbiter-core"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
 description = "Pure-logic library for arbiter: types, config, prompts, rules, diff parsing, threads, state, and revisions"
 

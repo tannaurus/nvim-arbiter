@@ -182,7 +182,7 @@ impl<'de> Deserialize<'de> for DiffStyle {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ReviewConfig {
-    /// Default ref for diff (e.g. "main"); nil = unstaged changes.
+    /// Default ref for `:ArbiterCompare` (e.g. "main"). None requires an explicit argument.
     pub default_ref: Option<String>,
     /// Start in side-by-side view.
     pub side_by_side: bool,
@@ -402,7 +402,7 @@ impl Default for KeymapConfig {
             list_threads_user: "<Leader>atu".to_string(),
             list_threads_stale: "<Leader>atb".to_string(),
             list_threads_open: "<Leader>ato".to_string(),
-            resolve_thread: "<Leader>ar".to_string(),
+            resolve_thread: "<Leader>aR".to_string(),
             toggle_resolved: "<Leader>a?".to_string(),
             re_anchor: "<Leader>aP".to_string(),
             refresh: "<Leader>aU".to_string(),

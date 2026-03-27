@@ -111,7 +111,7 @@ See [Per-workspace ref override](#per-workspace-ref-override) for configuring de
 ```lua
 return {
   "tannaurus/nvim-arbiter",
-  tag = "v0.0.7", -- pin to a release tag
+  tag = "v0.0.8", -- pin to a release tag
   build = function()
     require("arbiter.build").download_or_build_binary()
   end,
@@ -373,7 +373,7 @@ require("arbiter").setup({
     list_threads_user = "<Leader>atu",  -- Thread list (user threads only)
     list_threads_stale = "<Leader>atb", -- Thread list (stale only)
     list_threads_open = "<Leader>ato",   -- Thread list (open only)
-    resolve_thread = "<Leader>ar",       -- Resolve/reopen thread at cursor
+    resolve_thread = "<Leader>aR",       -- Resolve thread at cursor
     toggle_resolved = "<Leader>a?",      -- Toggle display of resolved threads
     re_anchor = "<Leader>aP",     -- Re-anchor thread to current cursor line
     refresh = "<Leader>aU",       -- Refresh file list and current diff
