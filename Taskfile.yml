@@ -59,3 +59,9 @@ tasks:
       - task: fmt
       - task: lint
       - task: test
+
+  docs:
+    desc: Start the documentation site locally
+    dir: docs/site
+    cmds:
+      - npm start

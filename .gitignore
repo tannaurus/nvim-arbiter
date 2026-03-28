@@ -22,6 +22,11 @@ lua/arbiter.dylib
 # Plugin state directory (local review data)
 .arbiter/
 
+# Docusaurus
+docs/site/node_modules/
+docs/site/build/
+docs/site/.docusaurus/
+
 # Environment
 .env
 .env.*
