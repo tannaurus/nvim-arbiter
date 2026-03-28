@@ -80,7 +80,18 @@ When a thread conversation is open:
 | Key | Action |
 |-----|--------|
 | `<CR>` | Reply to the thread (opens input split below the thread panel). |
+| `]r` / `[r` | Next / previous revision (enters revision view if not already in it). |
 | `q` | Close the thread window. |
+
+## Revision view
+
+When viewing a revision snapshot:
+
+| Key | Action |
+|-----|--------|
+| `<Leader>rv` | Enter revision view for the current thread. |
+| `]r` / `[r` | Next / previous revision. |
+| `Esc` | Exit revision view and return to the full diff. |
 
 ## Prompt panel
 
