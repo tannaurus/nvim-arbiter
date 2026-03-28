@@ -105,7 +105,6 @@ fn status_icon(review_status: ReviewStatus, file_status: FileStatus) -> &'static
     }
     match review_status {
         ReviewStatus::Approved => "✓",
-        ReviewStatus::NeedsChanges => "✗",
         ReviewStatus::Unreviewed => "·",
     }
 }
@@ -213,7 +212,6 @@ fn build_tree(
                     .unwrap_or_default();
                 let review_tag = match review_status {
                     ReviewStatus::Approved => " [✓]",
-                    ReviewStatus::NeedsChanges => " [✗]",
                     ReviewStatus::Unreviewed => "",
                 };
                 lines.push(format!("{indent}{icon} {name}{thread_tag}{review_tag}"));
@@ -226,10 +224,6 @@ fn build_tree(
         .iter()
         .filter(|(_, _, rs)| *rs == ReviewStatus::Approved)
         .count();
-    let needs = files
-        .iter()
-        .filter(|(_, _, rs)| *rs == ReviewStatus::NeedsChanges)
-        .count();
     let unreviewed = files
         .iter()
         .filter(|(_, _, rs)| *rs == ReviewStatus::Unreviewed)
@@ -238,7 +232,7 @@ fn build_tree(
         lines.push(String::new());
     }
     lines.push(format!(
-        "── {} files │ ✓ {approved} │ ✗ {needs} │ · {unreviewed} ──",
+        "── {} files │ ✓ {approved} │ · {unreviewed} ──",
         files.len()
     ));
 
@@ -370,10 +364,6 @@ mod tests {
             "✓"
         );
         assert_eq!(
-            status_icon(ReviewStatus::NeedsChanges, FileStatus::Modified),
-            "✗"
-        );
-        assert_eq!(
             status_icon(ReviewStatus::Unreviewed, FileStatus::Untracked),
             "+"
         );
@@ -413,16 +403,13 @@ mod tests {
     fn build_tree_review_tags() {
         let files = vec![
             file("a.rs", FileStatus::Modified, ReviewStatus::Approved),
-            file("b.rs", FileStatus::Modified, ReviewStatus::NeedsChanges),
-            file("c.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
+            file("b.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
         ];
         let result = build_tree(&files, &no_collapse(), &no_threads());
         let a_line = result.lines.iter().find(|l| l.contains("a.rs")).unwrap();
         let b_line = result.lines.iter().find(|l| l.contains("b.rs")).unwrap();
-        let c_line = result.lines.iter().find(|l| l.contains("c.rs")).unwrap();
         assert!(a_line.contains("[✓]"));
-        assert!(b_line.contains("[✗]"));
-        assert!(!c_line.contains("[✓]") && !c_line.contains("[✗]"));
+        assert!(!b_line.contains("[✓]"));
     }
 
     #[test]
@@ -430,15 +417,13 @@ mod tests {
         let files = vec![
             file("a.rs", FileStatus::Modified, ReviewStatus::Approved),
             file("b.rs", FileStatus::Modified, ReviewStatus::Approved),
-            file("c.rs", FileStatus::Modified, ReviewStatus::NeedsChanges),
+            file("c.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
             file("d.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
-            file("e.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
         ];
         let result = build_tree(&files, &no_collapse(), &no_threads());
         let summary = result.lines.last().unwrap();
-        assert!(summary.contains("5 files"));
+        assert!(summary.contains("4 files"));
         assert!(summary.contains("✓ 2"));
-        assert!(summary.contains("✗ 1"));
         assert!(summary.contains("· 2"));
     }
 
@@ -546,7 +531,7 @@ mod tests {
             file(
                 "src/config.rs",
                 FileStatus::Modified,
-                ReviewStatus::NeedsChanges,
+                ReviewStatus::Unreviewed,
             ),
             file(
                 "src/api/handler.rs",

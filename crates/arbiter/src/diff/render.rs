@@ -8,6 +8,33 @@ use crate::types::{ThreadOrigin, ThreadStatus};
 use nvim_oxi::api::opts::{OptionOpts, SetExtmarkOpts};
 use nvim_oxi::api::types::ExtmarkHlMode;
 use nvim_oxi::api::{self, Buffer, Window};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+static STYLE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+fn active_style() -> DiffStyle {
+    match STYLE_OVERRIDE.load(Ordering::Relaxed) {
+        1 => DiffStyle::Full,
+        2 => DiffStyle::Signs,
+        _ => config::get().review.diff_style,
+    }
+}
+
+/// Toggles between Full and Signs diff style at runtime.
+/// Returns the new style.
+pub(crate) fn toggle_style() -> DiffStyle {
+    let current = active_style();
+    let next = match current {
+        DiffStyle::Full => DiffStyle::Signs,
+        DiffStyle::Signs => DiffStyle::Full,
+    };
+    let val = match next {
+        DiffStyle::Full => 1u8,
+        DiffStyle::Signs => 2,
+    };
+    STYLE_OVERRIDE.store(val, Ordering::Relaxed);
+    next
+}
 use std::collections::{HashMap, HashSet};
 
 use crate::types::ThreadSummary;
@@ -89,10 +116,9 @@ pub(crate) struct RenderResult {
 
 /// Renders diff text and thread summaries into a buffer.
 ///
-/// Builds: file header line, thread summary lines (filtered by
-/// `show_resolved`), then raw diff lines. Returns hunks with
-/// `buf_start`/`buf_end` offset by injected lines, and a map
-/// of thread_id to buffer line.
+/// Builds: file header line, thread summary lines, then raw diff lines.
+/// Returns hunks with `buf_start`/`buf_end` offset by injected lines,
+/// and a map of thread_id to buffer line.
 ///
 /// If `new_hunk_buf_starts` is provided, ArbiterHunkNew highlight is applied
 /// to those hunk header lines.
@@ -101,7 +127,6 @@ pub(crate) fn render(
     diff_text: &str,
     summaries: &[ThreadSummary],
     file_path: &str,
-    show_resolved: bool,
     new_hunk_buf_starts: Option<&HashSet<usize>>,
     accepted_hashes: &HashSet<String>,
 ) -> nvim_oxi::Result<RenderResult> {
@@ -109,15 +134,11 @@ pub(crate) fn render(
     let diff_lines: Vec<String> = diff_text.lines().map(|s| s.to_string()).collect();
 
     let header = format!("── {} ({}) ──", file_path, summaries.len());
-    let visible: Vec<&ThreadSummary> = summaries
-        .iter()
-        .filter(|s| show_resolved || s.status != ThreadStatus::Resolved)
-        .collect();
 
-    let mut all_lines: Vec<String> = Vec::with_capacity(1 + visible.len() + diff_lines.len());
+    let mut all_lines: Vec<String> = Vec::with_capacity(1 + summaries.len() + diff_lines.len());
     all_lines.push(header);
     let mut thread_buf_lines = HashMap::new();
-    for (i, s) in visible.iter().enumerate() {
+    for (i, s) in summaries.iter().enumerate() {
         let summary_line = format!(
             " [{}] :{}  {} [{}]",
             s.origin,
@@ -130,7 +151,7 @@ pub(crate) fn render(
         all_lines.push(summary_line);
     }
 
-    let base_offset = 1 + visible.len();
+    let base_offset = 1 + summaries.len();
     let mut adjusted_hunks = Vec::with_capacity(hunks.len());
     let mut separator_count = 0;
     for (idx, h) in hunks.iter().enumerate() {
@@ -178,7 +199,7 @@ pub(crate) fn render(
         all_lines.extend(diff_lines);
     }
 
-    let style = config::get().review.diff_style;
+    let style = active_style();
 
     if style == DiffStyle::Signs {
         let display_lines: Vec<String> = all_lines
@@ -219,7 +240,7 @@ pub(crate) fn render(
     apply_highlights(
         buf,
         &adjusted_hunks,
-        &visible,
+        summaries,
         &all_lines,
         new_hunk_buf_starts,
         &accepted_buf_starts,
@@ -242,7 +263,7 @@ pub(crate) fn render(
 pub(crate) fn apply_highlights(
     buf: &mut Buffer,
     hunks: &[Hunk],
-    summaries: &[&ThreadSummary],
+    summaries: &[ThreadSummary],
     lines: &[String],
     new_hunk_buf_starts: Option<&HashSet<usize>>,
     accepted_buf_starts: &HashSet<usize>,
@@ -250,7 +271,7 @@ pub(crate) fn apply_highlights(
     let ns = api::create_namespace("arbiter-diff");
     let _ = buf.clear_namespace(ns, 0..usize::MAX);
 
-    let style = config::get().review.diff_style;
+    let style = active_style();
 
     let mut line_idx = 0;
     let replace_opts = |hl: &str| {

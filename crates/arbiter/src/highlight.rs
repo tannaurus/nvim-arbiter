@@ -37,7 +37,6 @@ pub(crate) fn setup() -> nvim_oxi::Result<()> {
         set_hl_default("ArbiterGutterHunkHeader", None, Some("#79c0ff"), true)?;
         set_hl_default("ArbiterGutterContext", None, Some("#484f58"), false)?;
         set_hl_default("ArbiterSignApproved", None, Some("#3fb950"), true)?;
-        set_hl_default("ArbiterSignChanges", None, Some("#f85149"), true)?;
         set_hl_default("ArbiterSignPending", None, Some("#6e7681"), false)?;
     } else {
         set_hl_default("ArbiterDiffAdd", Some("#dafbe1"), Some("#116329"), false)?;
@@ -55,7 +54,6 @@ pub(crate) fn setup() -> nvim_oxi::Result<()> {
         set_hl_default("ArbiterGutterHunkHeader", None, Some("#0550ae"), true)?;
         set_hl_default("ArbiterGutterContext", None, Some("#8c959f"), false)?;
         set_hl_default("ArbiterSignApproved", None, Some("#1a7f37"), true)?;
-        set_hl_default("ArbiterSignChanges", None, Some("#cf222e"), true)?;
         set_hl_default("ArbiterSignPending", None, Some("#656d76"), false)?;
     }
 
@@ -65,7 +63,6 @@ pub(crate) fn setup() -> nvim_oxi::Result<()> {
         ("ArbiterThreadAgent", "WarningMsg"),
         ("ArbiterThreadResolved", "NonText"),
         ("ArbiterStatusApproved", "DiagnosticOk"),
-        ("ArbiterStatusChanges", "DiagnosticError"),
         ("ArbiterStatusPending", "NonText"),
         ("ArbiterHunkNew", "DiffAdd"),
         ("ArbiterHunkAccepted", "Comment"),
@@ -76,6 +73,10 @@ pub(crate) fn setup() -> nvim_oxi::Result<()> {
         ("ArbiterRevisionFile", "NonText"),
         ("ArbiterSimilarHeader", "DiagnosticHint"),
         ("ArbiterSimilarRef", "NonText"),
+        ("ArbiterHeading", "Title"),
+        ("ArbiterBold", "Bold"),
+        ("ArbiterInlineCode", "@markup.raw"),
+        ("ArbiterCodeBlock", "CursorLine"),
     ];
     for (name, link_to) in linked {
         let _ = api::command(&format!("highlight default link {name} {link_to}"));

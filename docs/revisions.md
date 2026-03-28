@@ -47,7 +47,7 @@ Comments with a `RevisionRef` are displayed in the thread with context like "(on
 
 ### When to snapshot
 
-Snapshots are captured around backend dispatch calls that can produce file changes: initial comments and thread replies. Extraction prompts, re-anchor calls, and ask-mode calls do not modify files and are excluded.
+Snapshots are captured around backend dispatch calls that can produce file changes: initial comments and thread replies. Extraction prompts and ask-mode calls do not modify files and are excluded.
 
 ### Before-snapshot
 

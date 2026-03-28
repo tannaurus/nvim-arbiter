@@ -27,9 +27,24 @@ pub struct SimilarThreadContext {
     pub messages: Vec<(String, String)>,
 }
 
+impl SimilarThreadContext {
+    /// One-line summary for use in resumed-session prompts where the agent
+    /// already has the full context from the initial message.
+    pub fn summary_line(&self) -> String {
+        let preview: String = self
+            .messages
+            .first()
+            .map(|(_, text)| text.chars().take(80).collect())
+            .unwrap_or_default();
+        format!("{}:{} ({}) - {preview}", self.file, self.line, self.status)
+    }
+}
+
 /// Formats a comment prompt with file, line, and surrounding code context.
 ///
-/// Used when sending new comments to the agent.
+/// Used when sending new comments to the agent. The file diff included in the
+/// preamble is already scoped to the relevant hunks by the caller via
+/// `extract_nearby_diff`.
 pub fn format_comment_prompt(
     file: &str,
     line: u32,
@@ -51,22 +66,32 @@ pub struct ReplyContext<'a> {
     pub anchor_content: &'a str,
     pub context: &'a [String],
     pub prior_messages: &'a [(String, String)],
+    /// When true, the agent already has the full preamble, diff, thread
+    /// history, and similar threads from the initial message in its
+    /// conversation context. Only a minimal location reminder and the
+    /// reply text are sent.
+    pub is_resumed: bool,
 }
 
 /// Formats a reply prompt with file/line context.
 ///
-/// When resuming an existing session the agent already has prior conversation
-/// history, but including the location keeps the reply grounded. When starting
-/// a new session (no prior session_id) this context is essential.
+/// **Resumed sessions** (`is_resumed = true`): the agent already has the full
+/// preamble, diff, and prior messages in its conversation window. We send only
+/// a location reminder, compact similar-thread summaries (if any), and the
+/// reply text. This dramatically reduces token count on follow-up messages.
 ///
-/// If the thread has similar threads with relevant discussion, their
-/// conversations are appended so the agent can factor in prior solutions
-/// without being told to apply them blindly.
+/// **New sessions** (`is_resumed = false`): the full preamble, diff, thread
+/// history, and similar thread conversations are included so the agent has
+/// complete context.
 pub fn format_reply_prompt(
     thread: &ReplyContext<'_>,
     review_ctx: &ReviewContext<'_>,
     similar_threads: &[SimilarThreadContext],
 ) -> String {
+    if thread.is_resumed {
+        return format_resumed_reply(thread, similar_threads);
+    }
+
     let preamble = format_review_preamble(review_ctx, thread.file);
     let ctx_block = format_context_block(
         thread.file,
@@ -83,27 +108,53 @@ pub fn format_reply_prompt(
         }
     }
 
-    if !similar_threads.is_empty() {
-        prompt.push_str(
-            "\n\nRelated threads (for context only - apply solutions from these \
-             only when directly relevant to this thread's issue):\n",
-        );
-        for (i, st) in similar_threads.iter().enumerate() {
-            prompt.push_str(&format!(
-                "\n--- Similar thread {} ({}, {}:{}) ---\n",
-                i + 1,
-                st.status,
-                st.file,
-                st.line,
-            ));
-            for (role, text) in &st.messages {
-                prompt.push_str(&format!("[{role}]: {text}\n"));
-            }
-        }
-    }
+    append_similar_threads_full(&mut prompt, similar_threads);
 
     prompt.push_str(&format!("\nReply: {}", thread.reply));
     prompt
+}
+
+fn format_resumed_reply(
+    thread: &ReplyContext<'_>,
+    similar_threads: &[SimilarThreadContext],
+) -> String {
+    let mut prompt = format!("[{}:{}] ", thread.file, thread.line);
+
+    if !similar_threads.is_empty() {
+        prompt.push_str("Related threads: ");
+        for (i, st) in similar_threads.iter().enumerate() {
+            if i > 0 {
+                prompt.push_str("; ");
+            }
+            prompt.push_str(&st.summary_line());
+        }
+        prompt.push('\n');
+    }
+
+    prompt.push_str(thread.reply);
+    prompt
+}
+
+fn append_similar_threads_full(prompt: &mut String, similar_threads: &[SimilarThreadContext]) {
+    if similar_threads.is_empty() {
+        return;
+    }
+    prompt.push_str(
+        "\n\nRelated threads (for context only - apply solutions from these \
+         only when directly relevant to this thread's issue):\n",
+    );
+    for (i, st) in similar_threads.iter().enumerate() {
+        prompt.push_str(&format!(
+            "\n--- Similar thread {} ({}, {}:{}) ---\n",
+            i + 1,
+            st.status,
+            st.file,
+            st.line,
+        ));
+        for (role, text) in &st.messages {
+            prompt.push_str(&format!("[{role}]: {text}\n"));
+        }
+    }
 }
 
 /// Formats the extraction prompt that asks the agent to distill generalizable
@@ -323,6 +374,65 @@ pub fn parse_similarity_response(text: &str) -> Vec<Vec<usize>> {
             }
         })
         .collect()
+}
+
+/// Extracts diff hunks near a given source line, discarding unrelated hunks.
+///
+/// Keeps any hunk whose new-file range overlaps `[line - margin, line + margin]`.
+/// Returns the full diff unchanged if it cannot be parsed or if all hunks are
+/// within range.
+pub fn extract_nearby_diff(full_diff: &str, line: u32, margin: u32) -> String {
+    let lo = line.saturating_sub(margin) as usize;
+    let hi = (line + margin) as usize;
+
+    let mut kept_hunks: Vec<&str> = Vec::new();
+    let mut current_start: Option<usize> = None;
+    let mut current_matches = false;
+    let lines: Vec<&str> = full_diff.lines().collect();
+
+    for (i, &l) in lines.iter().enumerate() {
+        if l.starts_with("@@") {
+            if let Some(start) = current_start {
+                if current_matches {
+                    for kept in &lines[start..i] {
+                        kept_hunks.push(kept);
+                    }
+                }
+            }
+            current_start = Some(i);
+            current_matches = false;
+
+            if let Some((new_start, new_count)) = parse_hunk_header_range(l) {
+                let hunk_end = new_start + new_count.saturating_sub(1);
+                if new_start <= hi && hunk_end >= lo {
+                    current_matches = true;
+                }
+            }
+        }
+    }
+
+    if let Some(start) = current_start {
+        if current_matches {
+            for kept in &lines[start..] {
+                kept_hunks.push(kept);
+            }
+        }
+    }
+
+    if kept_hunks.is_empty() {
+        return full_diff.to_string();
+    }
+
+    kept_hunks.join("\n")
+}
+
+fn parse_hunk_header_range(header: &str) -> Option<(usize, usize)> {
+    let after_plus = header.strip_prefix("@@ ")?.split('+').nth(1)?;
+    let nums = after_plus.split(' ').next()?;
+    let mut parts = nums.split(',');
+    let start: usize = parts.next()?.parse().ok()?;
+    let count: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    Some((start, count))
 }
 
 fn format_review_preamble(ctx: &ReviewContext<'_>, file: &str) -> String {
@@ -702,6 +812,7 @@ mod tests {
                 anchor_content: "let x = 1;",
                 context: &[],
                 prior_messages: &msgs,
+                is_resumed: false,
             },
             &ctx,
             &[],
@@ -736,6 +847,7 @@ mod tests {
                 anchor_content: "let x = 1;",
                 context: &[],
                 prior_messages: &[],
+                is_resumed: false,
             },
             &ctx,
             &similar,
@@ -763,6 +875,7 @@ mod tests {
                 anchor_content: "let x = 1;",
                 context: &[],
                 prior_messages: &prior,
+                is_resumed: false,
             },
             &ctx,
             &[],
@@ -789,6 +902,7 @@ mod tests {
                 anchor_content: "let x = 1;",
                 context: &[],
                 prior_messages: &[],
+                is_resumed: false,
             },
             &ctx,
             &[],
@@ -925,6 +1039,7 @@ mod tests {
                 anchor_content: "    setup();",
                 context: &context_lines,
                 prior_messages: &prior,
+                is_resumed: false,
             },
             &ctx,
             &similar,
@@ -961,6 +1076,104 @@ mod tests {
         ];
         let output = format_apply_feedback_prompt(&items, &ctx).unwrap();
         insta::assert_snapshot!("apply_feedback_prompt_with_rules", output);
+    }
+
+    #[test]
+    fn resumed_reply_skips_preamble() {
+        let ctx = ReviewContext {
+            ref_name: "main",
+            file_diff: "@@ -1,3 +1,3 @@\n-old\n+new",
+            review_rules: &["rule".to_string()],
+            project_rules: "project rule".to_string(),
+        };
+        let prior = vec![("user".to_string(), "initial".to_string())];
+        let prompt = format_reply_prompt(
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "follow up",
+                anchor_content: "let x = 1;",
+                context: &[],
+                prior_messages: &prior,
+                is_resumed: true,
+            },
+            &ctx,
+            &[],
+        );
+        assert!(!prompt.contains("code review assistant"));
+        assert!(!prompt.contains("Diff for"));
+        assert!(!prompt.contains("Thread history:"));
+        assert!(!prompt.contains("rule"));
+        assert!(prompt.contains("[a.rs:5]"));
+        assert!(prompt.contains("follow up"));
+    }
+
+    #[test]
+    fn resumed_reply_includes_similar_summaries() {
+        let ctx = empty_ctx();
+        let similar = vec![SimilarThreadContext {
+            file: "other.rs".to_string(),
+            line: 10,
+            status: "resolved".to_string(),
+            messages: vec![
+                ("agent".to_string(), "Use map_err here".to_string()),
+                ("user".to_string(), "Good call, done".to_string()),
+            ],
+        }];
+        let prompt = format_reply_prompt(
+            &ReplyContext {
+                file: "a.rs",
+                line: 5,
+                reply: "ok",
+                anchor_content: "",
+                context: &[],
+                prior_messages: &[],
+                is_resumed: true,
+            },
+            &ctx,
+            &similar,
+        );
+        assert!(prompt.contains("Related threads:"));
+        assert!(prompt.contains("other.rs:10 (resolved)"));
+        assert!(!prompt.contains("Good call, done"));
+    }
+
+    #[test]
+    fn extract_nearby_diff_keeps_relevant_hunks() {
+        let diff = "@@ -1,3 +1,3 @@\n-old line 1\n+new line 1\n context\n\
+                     @@ -100,3 +100,4 @@\n context\n+added far away\n context\n";
+        let result = extract_nearby_diff(diff, 2, 50);
+        assert!(result.contains("new line 1"));
+        assert!(!result.contains("added far away"));
+    }
+
+    #[test]
+    fn extract_nearby_diff_returns_full_when_no_hunks() {
+        let diff = "this is not a real diff\njust some text";
+        let result = extract_nearby_diff(diff, 5, 50);
+        assert_eq!(result, diff);
+    }
+
+    #[test]
+    fn extract_nearby_diff_keeps_all_when_all_relevant() {
+        let diff = "@@ -1,5 +1,6 @@\n context\n-old\n+new\n context\n";
+        let result = extract_nearby_diff(diff, 3, 50);
+        assert!(result.contains("@@ -1,5 +1,6 @@"));
+        assert!(result.contains("+new"));
+    }
+
+    #[test]
+    fn similar_thread_summary_line() {
+        let st = SimilarThreadContext {
+            file: "src/lib.rs".to_string(),
+            line: 42,
+            status: "open".to_string(),
+            messages: vec![("user".to_string(), "This needs fixing".to_string())],
+        };
+        let line = st.summary_line();
+        assert!(line.contains("src/lib.rs:42"));
+        assert!(line.contains("(open)"));
+        assert!(line.contains("This needs fixing"));
     }
 
     use proptest::prelude::*;

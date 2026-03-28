@@ -164,7 +164,6 @@ pub(super) fn render_revision_file(review: &mut Review, path: &str) {
         &diff_text,
         &summaries,
         path,
-        false,
         None,
         &accepted,
     ) {
@@ -237,12 +236,15 @@ pub(super) fn handle_prev_revision(review: &mut Review) {
     }
 }
 
-pub(super) fn handle_revision_selected(review: &mut Review, rev_index: u32) {
+pub(super) fn handle_revision_selected(review: &mut Review, rev_index: u32, file: Option<&str>) {
     let tid = threads::window_thread_id();
     let Some(tid) = tid else {
         return;
     };
     enter_revision_view(review, &tid, rev_index);
+    if let Some(path) = file {
+        render_revision_file(review, path);
+    }
 }
 
 pub(super) fn gather_similar_context(

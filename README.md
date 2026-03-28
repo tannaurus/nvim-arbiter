@@ -31,11 +31,11 @@ These are decisions made during or around the review. They'd rot in a skill file
 - **Review memory** -- Conventions you enforce get extracted and fed into future prompts automatically.
 - **Project rules** -- Persistent, file-aware instructions loaded from markdown files with TOML frontmatter. Scope rules to specific file types and scenarios so the agent gets the right context for every prompt. See [Project rules](#project-rules).
 - **Similar threads** -- After self-review, a similarity pass groups threads that flag the same class of issue. Cross-references appear in the thread panel so you can navigate related feedback.
-- **Progress tracking** -- Approve files, accept hunks, filter threads by status. In working tree mode, accepting hunks stages them in git. State saved to disk.
+- **Progress tracking** -- Approve files, accept hunks. In working tree mode, accepting hunks stages them in git. State saved to disk.
 - **Self-review** -- The agent reviews its own diff and flags concerns before you start.
 - **Prompt panel** -- Long-lived agent conversations in a floating window. Multiple named conversations maintain independent context across the review. `:ArbiterPrompt` opens the default conversation; `:ArbiterPrompt security review` opens a named one.
 - **Live diffs** -- Filesystem polling picks up the agent's changes without manual refresh.
-- **Auto-resolve** -- Simple feedback ("rename this") resolves itself once the agent applies the fix.
+- **Auto-resolve** -- Self-review threads sent via `:ArbiterApply` resolve automatically once the agent applies the fix.
 - **Session persistence** -- Review state, threads, and conversations restored when you reopen. Stale caches from older plugin versions are automatically discarded.
 
 ## Workflow
@@ -59,23 +59,15 @@ Both modes use the same workbench, threads, and feedback loop. The only differen
 
 5. **The agent revises.** The agent reads your feedback and makes changes. Arbiter polls the filesystem and updates the diff automatically - you see changes appear without refreshing.
 
-6. **You track progress.** Mark files as approved (`<Leader>aa`) or needs-changes (`<Leader>ax`) as you go. Accept individual hunks with `<Leader>as` to track your progress within a file - when all hunks are accepted, the file is auto-approved. In working tree mode, accepting a hunk stages it in git (`git apply --cached`); toggling it back unstages only that hunk, leaving any pre-existing staged content untouched. In branch review mode, acceptance is visual-only. Use `<Leader>an`/`<Leader>ap` to jump between files you haven't reviewed yet. Run `:ArbiterSummary` for a summary of where you stand.
+6. **You track progress.** Mark files as approved (`<Leader>aa`) as you go. Accept individual hunks with `<Leader>as` to track your progress within a file - when all hunks are accepted, the file is auto-approved. In working tree mode, accepting a hunk stages it in git (`git apply --cached`); toggling it back unstages only that hunk, leaving any pre-existing staged content untouched. In branch review mode, acceptance is visual-only. Use `]u`/`[u` to jump between files you haven't reviewed yet. Run `:ArbiterSummary` for a summary of where you stand.
 
 7. **Repeat.** Continue reviewing, commenting, and approving until the changeset looks right. Close the workbench with `q` when you're done. Your review state (approvals, threads, conversations) is persisted to disk and restored if you reopen.
-
-### Quick feedback with auto-resolve
-
-For simple requests like "rename this variable" or "add a docstring here", use `<Leader>aA` instead of `<Leader>ac`. This creates a thread that auto-resolves once the agent applies the change - you don't have to manually close it.
 
 ### Agent self-review
 
 Before you start reviewing, run `:ArbiterSelfReview`. The agent reviews its own diff and flags anything it's uncertain about. Its concerns appear as threads anchored to the relevant lines, giving you a head start on where to focus. You can pass an optional prompt to steer what the agent focuses on, e.g. `:ArbiterSelfReview check error handling and edge cases`.
 
 To have the agent act on all its own feedback at once, run `:ArbiterApply`. This bundles every open self-review thread into a single prompt telling the agent to fix them all. Each thread is marked as auto-resolve, so they'll close automatically once the agent applies the changes.
-
-### Catching up
-
-If you step away and come back, `:ArbiterCatchUp` asks the agent to summarize what it's done. `:ArbiterList` shows saved sessions you can resume.
 
 ### Side-by-side diff
 
@@ -191,7 +183,7 @@ Run `:checkhealth arbiter` to verify your installation. It checks:
 
 #### nvim-tree
 
-Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, needs changes, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
+Arbiter ships a basic builtin file panel, but [nvim-tree](https://github.com/nvim-tree/nvim-tree.lua) is the recommended file panel for most users. It provides file-type icons, review status signs (approved, unreviewed), collapsible directories with familiar keybindings, and automatic filtering to show only changed files during a review.
 
 To enable it, set `file_panel = "nvim-tree"` in your arbiter config and wire arbiter's filter into your nvim-tree setup:
 
@@ -207,6 +199,34 @@ require("nvim-tree").setup({
 The filter is context-aware: when no review is active, it returns `false` for everything and nvim-tree behaves normally. When a review is open, it hides files that aren't part of the changeset. The filter is cleared automatically when the review closes.
 
 If you skip the `filters.custom` step, the nvim-tree panel will still work but will show all files in the project, not just changed ones.
+
+#### Telescope
+
+Arbiter ships a [Telescope](https://github.com/nvim-telescope/telescope.nvim) extension with two pickers scoped to your review files:
+
+- **`review_files`** - Fuzzy-find only files in the current review. Shows review status (approved/unreviewed) next to each file. Selecting a file navigates to it in the review workbench.
+- **`review_grep`** - Live grep scoped to review files only. Selecting a match navigates to the file and line in the workbench.
+
+No Telescope configuration is needed. The extension registers itself automatically when Telescope is installed. Use it via command or the default keymaps:
+
+```vim
+:Telescope arbiter review_files
+:Telescope arbiter review_grep
+```
+
+Telescope is optional. The keymaps show an error if Telescope is not installed.
+
+#### Custom picker integration
+
+For users of other file pickers (fzf-lua, fff, etc.), Arbiter exposes a Lua API to query the review file list:
+
+```lua
+local info = require("arbiter").review_files()
+-- Returns nil when no review is active.
+-- Otherwise: { cwd = "/abs/path", files = { { path = "src/foo.rs", status = "approved" }, ... } }
+```
+
+Use `info.files` to build a scoped search in any tool. To navigate back into the workbench, call `:ArbiterFile <path> [line]`.
 
 #### Statusline
 
@@ -257,7 +277,6 @@ require("arbiter").setup({
   -- Unicode otherwise.
   icons = {
     approved = nil,      -- default: "" (nerd) or "✔" (unicode)
-    needs_changes = nil,  -- default: "" (nerd) or "✘" (unicode)
     unreviewed = nil,    -- default: "" (nerd) or "○" (unicode)
   },
 
@@ -296,10 +315,10 @@ require("arbiter").setup({
     --            parses clean source code.
     diff_style = "full",
 
-    -- Seconds to wait before auto-resolve comments are marked resolved.
-    -- Auto-resolve comments (sent via the auto_resolve keymap) are
-    -- accepted automatically once the agent applies the requested change
-    -- and this timeout elapses without further edits.
+    -- Seconds to wait before auto-resolve threads are marked resolved.
+    -- Threads marked auto-resolve (e.g. via ArbiterApply) resolve
+    -- automatically once the agent applies the change and this timeout
+    -- elapses without further edits.
     auto_resolve_timeout = 60,
 
     -- How often (ms) to poll the current file for on-disk changes and
@@ -330,9 +349,6 @@ require("arbiter").setup({
   },
 
   prompts = {
-    -- Prompt sent by :ArbiterCatchUp. Useful for resuming after a break.
-    catch_up = "Summarize the changes you've made and the current state of the project.",
-
     -- Review direction sent by :ArbiterSelfReview. Controls what the agent
     -- looks for (tone, scope, strictness). The THREAD|file|line|message
     -- output format instructions are appended automatically.
@@ -363,25 +379,19 @@ require("arbiter").setup({
     prev_thread = "[t",           -- Previous open thread (crosses files)
     toggle_side_by_side = "<Leader>s",  -- Toggle unified / side-by-side view
     approve = "<Leader>aa",       -- Approve file (stages all hunks in working tree mode; resolve thread at cursor)
-    needs_changes = "<Leader>ax", -- Mark file as needs-changes
     reset_status = "<Leader>ar",  -- Reset file to unreviewed
     comment = "<Leader>ac",       -- Comment on the line and send to the agent
-    auto_resolve = "<Leader>aA",  -- Comment with auto-resolve on agent fix
     open_thread = "<Leader>ao",   -- Open thread conversation at cursor
     list_threads = "<Leader>at",  -- Thread list popup (grouped by status)
-    list_threads_agent = "<Leader>ata", -- Thread list (agent threads only)
-    list_threads_user = "<Leader>atu",  -- Thread list (user threads only)
-    list_threads_stale = "<Leader>atb", -- Thread list (stale only)
-    list_threads_open = "<Leader>ato",   -- Thread list (open only)
-    resolve_thread = "<Leader>aR",       -- Resolve thread at cursor
-    toggle_resolved = "<Leader>a?",      -- Toggle display of resolved threads
-    re_anchor = "<Leader>aP",     -- Re-anchor thread to current cursor line
-    refresh = "<Leader>aU",       -- Refresh file list and current diff
     cancel_request = "<Leader>aK", -- Cancel all pending backend requests
-    next_unreviewed = "<Leader>an", -- Jump to next unreviewed file
-    prev_unreviewed = "<Leader>ap", -- Jump to previous unreviewed file
+    next_unreviewed = "]u",         -- Jump to next unreviewed file
+    prev_unreviewed = "[u",         -- Jump to previous unreviewed file
     accept_hunk = "<Leader>as",   -- Accept/unaccept hunk under cursor (stages/unstages in working tree mode)
+    active_thread = "<Leader>aT", -- Open the thread for the agent currently thinking
+    toggle_diff_style = "<Leader>ad", -- Toggle diff style (full-line colors / gutter signs)
     file_back = "<C-o>",          -- Navigate back through file history
+    find_file = "<Leader>af",     -- Fuzzy-find review files (Telescope)
+    grep = "<Leader>ag",          -- Live grep across review files (Telescope)
   },
 })
 ```
@@ -517,7 +527,6 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterCompare [ref]` | Open the review workbench diffed against a branch. Uses `review.default_ref` if no argument given. |
 | `:ArbiterSend <prompt>` | Send a prompt to the agent. Response streams into a panel. |
 | `:ArbiterContinue [prompt]` | Continue the current session with an optional follow-up. |
-| `:ArbiterCatchUp` | Ask the agent to summarize where it left off. |
 | `:ArbiterList` | List saved sessions in a floating window. `<CR>` to select. |
 | `:ArbiterResume <id> [prompt]` | Resume a specific session by ID. |
 
@@ -530,8 +539,8 @@ Using `--yolo` (Cursor) or `--dangerously-skip-permissions` (Claude) via `extra_
 | `:ArbiterActiveThread` | Open the thread window for the agent that is currently thinking. |
 | `:ArbiterSelfReview [prompt]` | Run agent self-review on the current diff. Creates agent threads. Optional prompt steers focus. |
 | `:ArbiterApply` | Send all open self-review feedback to the agent in a single prompt. Marks each thread as auto-resolve so they close once the agent applies the changes. |
-| `:ArbiterRefresh` | Refresh the file list and current file diff. |
 | `:ArbiterOpenThread <file> <line>` | Open the thread at the given file and line number. |
+| `:ArbiterFile <path> [line]` | Navigate to a file in the review. Optional line number scrolls to that source line in the diff. Used by Telescope integration. |
 | `:ArbiterResolveAll` | Resolve all open threads. |
 | `:ArbiterSummary` | Show review summary popup (file/thread counts). |
 | `:ArbiterRules` | Open an editable popup with the current review rules. `:w` saves, `q` closes. |
@@ -556,27 +565,18 @@ All keybindings are active in the review workbench tabpage and are fully configu
 | Default | Action |
 |---------|--------|
 | `<Leader>aa` | Toggle approval on current file. In working tree mode, stages all hunks on approve and unstages on unapprove. Resolves thread if cursor is on a thread summary. |
-| `<Leader>ax` | Mark as needs-changes |
 | `<Leader>ar` | Reset to unreviewed |
 | `<Leader>as` | Accept/unaccept the hunk under the cursor. In working tree mode, stages/unstages the hunk in git. Auto-approves file when all hunks accepted. |
-| `<Leader>an` | Jump to next unreviewed file |
-| `<Leader>ap` | Jump to previous unreviewed file |
+| `]u` / `[u` | Next / previous unreviewed file |
 
 ### Comments and threads
 
 | Default | Action |
 |---------|--------|
 | `<Leader>ac` | Add a comment and send to the agent. Opens the thread window with streaming response. |
-| `<Leader>aA` | Add a comment with auto-resolve (auto-approves once the agent applies the change). |
 | `<Leader>ao` | Open the thread conversation at the cursor. |
 | `<Leader>at` | Open thread list popup (grouped by status). |
-| `<Leader>ata` | Open thread list filtered to agent-created threads. |
-| `<Leader>atu` | Open thread list filtered to user-created threads. |
-| `<Leader>atb` | Open thread list filtered to stale threads (anchor lost). |
-| `<Leader>ato` | Open thread list filtered to open threads. |
-| `<Leader>aR` | Resolve the thread at the cursor. |
-| `<Leader>a?` | Toggle display of resolved threads. |
-| `<Leader>aP` | Re-anchor a thread to the current cursor position. |
+| `<Leader>aT` | Open the thread for the agent that is currently thinking. |
 | `<Leader>aK` | Cancel all pending backend requests. |
 
 ### Other
@@ -585,7 +585,9 @@ All keybindings are active in the review workbench tabpage and are fully configu
 |---------|--------|
 | `<CR>` | Open the thread at the cursor line (or jump to source if no thread). |
 | `<Leader>s` | Toggle side-by-side diff view. |
-| `<Leader>aU` | Refresh file list and current diff. |
+| `<Leader>ad` | Toggle diff highlighting style (full-line colors vs gutter signs). |
+| `<Leader>af` | Fuzzy-find review files (Telescope). |
+| `<Leader>ag` | Live grep across review files (Telescope). |
 | `<C-o>` | Navigate back through file history (works across file jumps, thread jumps, and auto-advance). |
 | `q` | Close the review workbench. |
 
@@ -597,7 +599,7 @@ All keybindings are active in the review workbench tabpage and are fully configu
 
 ### Thread list popup
 
-When the thread list popup is open (via `<Leader>at` and variants):
+When the thread list popup is open (via `<Leader>at`):
 
 | Key | Action |
 |-----|--------|
@@ -607,7 +609,7 @@ When the thread list popup is open (via `<Leader>at` and variants):
 
 ### Comment input float
 
-When the input float opens (via `<Leader>ac` or `<Leader>aA`), you're placed in Insert mode:
+When the input float opens (via `<Leader>ac`), you're placed in Insert mode:
 
 | Key | Mode | Action |
 |-----|------|--------|
@@ -659,7 +661,7 @@ The plugin is written in Rust using `nvim-oxi` for typed bindings to Neovim's C 
 - `types` - Shared domain types (review status, thread status, backend ops)
 - `config` - Configuration deserialization with per-workspace overrides
 - `diff` - Unified diff parser, hunk extraction, and patch building
-- `threads` - Thread CRUD, anchoring, re-anchoring, filtering, and projection
+- `threads` - Thread CRUD, anchoring, filtering, and projection
 - `prompts` - Prompt formatting for reviews, replies, self-review, and rule extraction
 - `rules` - Scenario-scoped rule system with glob matching and TOML frontmatter
 - `state` - JSON persistence of review state, threads, and sessions

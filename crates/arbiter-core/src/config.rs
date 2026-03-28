@@ -146,8 +146,6 @@ impl<'de> Deserialize<'de> for FilePanelKind {
 pub struct IconConfig {
     /// Icon shown for approved files. Examples: "✔", "", "👍"
     pub approved: Option<String>,
-    /// Icon shown for files needing changes. Examples: "✘", "", "❌"
-    pub needs_changes: Option<String>,
     /// Icon shown for unreviewed files. Examples: "○", "", "⏳"
     pub unreviewed: Option<String>,
 }
@@ -298,8 +296,6 @@ pub const SELF_REVIEW_FORMAT_SUFFIX: &str = concat!(
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct PromptConfig {
-    /// Catch-up summarization prompt.
-    pub catch_up: String,
     /// Self-review guidance. Format instructions for the THREAD wire format
     /// are appended automatically; this field controls only the review
     /// direction (what to look for, tone, scope, etc.).
@@ -309,8 +305,6 @@ pub struct PromptConfig {
 impl Default for PromptConfig {
     fn default() -> Self {
         Self {
-            catch_up: "Summarize the changes you've made and the current state of the project."
-                .to_string(),
             self_review:
                 "Review this diff and flag anything you're uncertain about or want feedback on."
                     .to_string(),
@@ -341,34 +335,14 @@ pub struct KeymapConfig {
     pub toggle_side_by_side: String,
     /// Mark current file as approved.
     pub approve: String,
-    /// Mark current file as needs-changes.
-    pub needs_changes: String,
     /// Reset current file's review status to unreviewed.
     pub reset_status: String,
     /// Add a comment and send it to the agent.
     pub comment: String,
-    /// Add a comment with auto-resolve (auto-approved once the agent applies it).
-    pub auto_resolve: String,
     /// Open the thread conversation at the cursor.
     pub open_thread: String,
     /// List all threads in a floating window.
     pub list_threads: String,
-    /// List only agent-created threads.
-    pub list_threads_agent: String,
-    /// List only user-created threads.
-    pub list_threads_user: String,
-    /// List only stale threads (anchor lost).
-    pub list_threads_stale: String,
-    /// List only open (unresolved) threads.
-    pub list_threads_open: String,
-    /// Resolve the thread at the cursor.
-    pub resolve_thread: String,
-    /// Toggle showing resolved threads in the diff panel.
-    pub toggle_resolved: String,
-    /// Re-anchor a thread to the current cursor position.
-    pub re_anchor: String,
-    /// Refresh the current file diff and file list.
-    pub refresh: String,
     /// Cancel all pending backend requests.
     pub cancel_request: String,
     /// Jump to next file with open threads or non-approved status.
@@ -377,8 +351,16 @@ pub struct KeymapConfig {
     pub prev_unreviewed: String,
     /// Toggle the hunk under the cursor as accepted in the review checklist.
     pub accept_hunk: String,
+    /// Open the thread window for the agent that is currently thinking.
+    pub active_thread: String,
+    /// Toggle diff highlighting style between full-line colors and gutter signs.
+    pub toggle_diff_style: String,
     /// Go back to the previous file after auto-advance on approval.
     pub file_back: String,
+    /// Fuzzy-find review files (requires Telescope).
+    pub find_file: String,
+    /// Live grep across review files (requires Telescope).
+    pub grep: String,
 }
 
 impl Default for KeymapConfig {
@@ -392,25 +374,19 @@ impl Default for KeymapConfig {
             prev_thread: "[t".to_string(),
             toggle_side_by_side: "<Leader>s".to_string(),
             approve: "<Leader>aa".to_string(),
-            needs_changes: "<Leader>ax".to_string(),
             reset_status: "<Leader>ar".to_string(),
             comment: "<Leader>ac".to_string(),
-            auto_resolve: "<Leader>aA".to_string(),
             open_thread: "<Leader>ao".to_string(),
             list_threads: "<Leader>at".to_string(),
-            list_threads_agent: "<Leader>ata".to_string(),
-            list_threads_user: "<Leader>atu".to_string(),
-            list_threads_stale: "<Leader>atb".to_string(),
-            list_threads_open: "<Leader>ato".to_string(),
-            resolve_thread: "<Leader>aR".to_string(),
-            toggle_resolved: "<Leader>a?".to_string(),
-            re_anchor: "<Leader>aP".to_string(),
-            refresh: "<Leader>aU".to_string(),
             cancel_request: "<Leader>aK".to_string(),
-            next_unreviewed: "<Leader>an".to_string(),
-            prev_unreviewed: "<Leader>ap".to_string(),
+            next_unreviewed: "]u".to_string(),
+            prev_unreviewed: "[u".to_string(),
             accept_hunk: "<Leader>as".to_string(),
+            active_thread: "<Leader>aT".to_string(),
+            toggle_diff_style: "<Leader>ad".to_string(),
             file_back: "<C-o>".to_string(),
+            find_file: "<Leader>af".to_string(),
+            grep: "<Leader>ag".to_string(),
         }
     }
 }

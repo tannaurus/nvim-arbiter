@@ -1,4 +1,4 @@
-//! Thread CRUD, re-anchoring, filtering, and projection.
+//! Thread CRUD, anchoring, filtering, and projection.
 //!
 //! All functions take `&[Thread]` or `&mut [Thread]`; no imports from
 //! git, diff, backend, or review. Pure logic, no Neovim API.

@@ -97,8 +97,6 @@ pub enum ReviewStatus {
     Unreviewed,
     /// Approved by the reviewer.
     Approved,
-    /// Marked as needing changes.
-    NeedsChanges,
 }
 
 impl std::fmt::Display for ReviewStatus {
@@ -106,7 +104,6 @@ impl std::fmt::Display for ReviewStatus {
         match self {
             ReviewStatus::Unreviewed => write!(f, "unreviewed"),
             ReviewStatus::Approved => write!(f, "approved"),
-            ReviewStatus::NeedsChanges => write!(f, "needs-changes"),
         }
     }
 }
@@ -244,16 +241,11 @@ mod tests {
     fn review_status_display() {
         assert_eq!(ReviewStatus::Unreviewed.to_string(), "unreviewed");
         assert_eq!(ReviewStatus::Approved.to_string(), "approved");
-        assert_eq!(ReviewStatus::NeedsChanges.to_string(), "needs-changes");
     }
 
     #[test]
     fn review_status_serde_roundtrip() {
-        for v in [
-            ReviewStatus::Unreviewed,
-            ReviewStatus::Approved,
-            ReviewStatus::NeedsChanges,
-        ] {
+        for v in [ReviewStatus::Unreviewed, ReviewStatus::Approved] {
             let j = serde_json::to_string(&v).unwrap();
             let r: ReviewStatus = serde_json::from_str(&j).unwrap();
             assert_eq!(v, r);

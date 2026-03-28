@@ -27,6 +27,8 @@ thread_local! {
     static ON_REVISION: RefCell<Option<OnRevisionSelected>> = const { RefCell::new(None) };
     static ON_SIMILAR: RefCell<Option<OnSimilarSelected>> = const { RefCell::new(None) };
     static SIMILAR_MAP: RefCell<Vec<(usize, String)>> = const { RefCell::new(Vec::new()) };
+    static REVISION_FILE_MAP: RefCell<Vec<(usize, u32, String)>> = const { RefCell::new(Vec::new()) };
+    static LAST_PROMPT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Callback invoked when the user requests to reply (presses `<CR>`).
@@ -35,9 +37,10 @@ pub type OnReplyRequested = Box<dyn Fn() + Send + Sync>;
 /// Callback invoked when the thread panel is closed via `q`.
 pub type OnClose = Arc<dyn Fn() + Send + Sync>;
 
-/// Callback invoked when the user presses `<CR>` on a revision summary line.
-/// Receives the 1-based revision index.
-pub type OnRevisionSelected = Arc<dyn Fn(u32) + Send + Sync>;
+/// Callback invoked when the user presses `<CR>` on a revision summary or
+/// file line. Receives the 1-based revision index and an optional file path
+/// to navigate to within the revision.
+pub type OnRevisionSelected = Arc<dyn Fn(u32, Option<String>) + Send + Sync>;
 
 /// Callback invoked when the user presses `<CR>` on a similar-thread line.
 /// Receives the thread ID of the similar thread.
@@ -86,6 +89,8 @@ pub fn open(
     lines.push(title_line);
     lines.push(String::new());
 
+    let mut formatted_blocks: Vec<(usize, Vec<FormattedLine>)> = Vec::new();
+
     for (i, m) in messages.iter().enumerate() {
         if i > 0 {
             let sep_idx = lines.len();
@@ -108,8 +113,17 @@ pub fn open(
         highlights.push((line_idx, hl));
         lines.push(author_line);
 
-        for l in m.text.lines() {
-            lines.push(format!("  {l}"));
+        if m.role == Role::Agent {
+            let formatted = format_agent_lines(&m.text);
+            let base = lines.len();
+            for fl in &formatted {
+                lines.push(fl.text.clone());
+            }
+            formatted_blocks.push((base, formatted));
+        } else {
+            for l in m.text.lines() {
+                lines.push(format!("  {l}"));
+            }
         }
         lines.push(String::new());
     }
@@ -121,6 +135,9 @@ pub fn open(
     let ns = api::create_namespace("arbiter-thread-win");
     for (line_idx, hl) in &highlights {
         let _ = buf.add_highlight(ns, hl, *line_idx, 0..);
+    }
+    for (base, formatted) in &formatted_blocks {
+        apply_inline_highlights(&mut buf, ns, *base, formatted);
     }
 
     let tw = &config::get().thread_window;
@@ -146,10 +163,17 @@ pub fn open(
     let on_reply_cell = Arc::new(callbacks.on_reply);
     let opts = SetKeymapOpts::builder()
         .callback(move |_| {
-            if let Some(rev_idx) = revision_at_cursor() {
+            if cursor_on_status_line() {
+                show_last_prompt();
+            } else if let Some(rev_idx) = revision_at_cursor() {
                 let cb = ON_REVISION.with(|c| c.borrow().clone());
                 if let Some(cb) = cb {
-                    cb(rev_idx);
+                    cb(rev_idx, None);
+                }
+            } else if let Some((rev_idx, path)) = revision_file_at_cursor() {
+                let cb = ON_REVISION.with(|c| c.borrow().clone());
+                if let Some(cb) = cb {
+                    cb(rev_idx, Some(path));
                 }
             } else if let Some(tid) = similar_at_cursor() {
                 let cb = ON_SIMILAR.with(|c| c.borrow().clone());
@@ -182,6 +206,7 @@ pub fn open(
     ON_REVISION.with(|c| *c.borrow_mut() = callbacks.on_revision);
     ON_SIMILAR.with(|c| *c.borrow_mut() = callbacks.on_similar);
     SIMILAR_MAP.with(|c| c.borrow_mut().clear());
+    REVISION_FILE_MAP.with(|c| c.borrow_mut().clear());
 
     let _ = api::create_autocmd(
         ["BufWipeout"],
@@ -235,9 +260,19 @@ pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
         }
         let author_offset = new_lines.len();
         new_lines.push(author_line);
-        for l in text.lines() {
-            new_lines.push(format!("  {l}"));
-        }
+
+        let formatted = if role == Role::Agent {
+            let f = format_agent_lines(text);
+            for fl in &f {
+                new_lines.push(fl.text.clone());
+            }
+            Some(f)
+        } else {
+            for l in text.lines() {
+                new_lines.push(format!("  {l}"));
+            }
+            None
+        };
         new_lines.push(String::new());
 
         let refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
@@ -251,6 +286,10 @@ pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
             let _ = buf.add_highlight(ns, "NonText", line_count, 0..);
         }
         let _ = buf.add_highlight(ns, hl, line_count + author_offset, 0..);
+        if let Some(formatted) = &formatted {
+            let content_start = line_count + author_offset + 1;
+            apply_inline_highlights(buf, ns, content_start, formatted);
+        }
 
         scroll_to_bottom(buf);
 
@@ -261,7 +300,8 @@ pub fn append_message(role: Role, text: &str) -> nvim_oxi::Result<()> {
 /// Replaces the last agent message block with authoritative final text.
 ///
 /// Called when the backend result arrives to fix any streaming artifacts
-/// (e.g. missing newlines at chunk boundaries).
+/// (e.g. missing newlines at chunk boundaries). Applies markdown-lite
+/// formatting to the final content.
 pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
     BUFFER.with(|c| {
         let mut guard = c.borrow_mut();
@@ -281,9 +321,10 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
         };
 
         let content_start = header_idx + 1;
+        let formatted = format_agent_lines(text);
         let mut new_lines: Vec<String> = Vec::new();
-        for l in text.lines() {
-            new_lines.push(format!("  {l}"));
+        for fl in &formatted {
+            new_lines.push(fl.text.clone());
         }
         new_lines.push(String::new());
 
@@ -292,6 +333,9 @@ pub fn replace_last_agent_message(text: &str) -> nvim_oxi::Result<()> {
         let refs: Vec<&str> = new_lines.iter().map(|s| s.as_str()).collect();
         buf.set_lines(content_start..line_count, false, refs)?;
         api::set_option_value("modifiable", false, &buf_opts)?;
+
+        let ns = api::create_namespace("arbiter-thread-win");
+        apply_inline_highlights(buf, ns, content_start, &formatted);
 
         scroll_to_bottom(buf);
         Ok(())
@@ -442,14 +486,14 @@ pub fn append_revision_summary(
             line_count + header_offset,
             0..,
         );
-        for i in 0..stats.len() {
-            let _ = buf.add_highlight(
-                ns,
-                "ArbiterRevisionFile",
-                line_count + header_offset + 1 + i,
-                0..,
-            );
-        }
+        REVISION_FILE_MAP.with(|m| {
+            let mut map = m.borrow_mut();
+            for (i, (path, _, _)) in stats.iter().enumerate() {
+                let buf_line = line_count + header_offset + 1 + i;
+                map.push((buf_line, rev_index, path.clone()));
+                let _ = buf.add_highlight(ns, "ArbiterRevisionFile", buf_line, 0..);
+            }
+        });
 
         scroll_to_bottom(buf);
         Ok(())
@@ -653,9 +697,256 @@ pub fn revision_at_cursor() -> Option<u32> {
     })
 }
 
+/// Returns the revision index and file path if the cursor is on a revision
+/// file line (e.g. `    path/to/file.rs  (+5 -3)`).
+fn revision_file_at_cursor() -> Option<(u32, String)> {
+    WINDOW.with(|w| {
+        let guard = w.borrow();
+        let win = guard.as_ref()?;
+        let (row, _) = win.get_cursor().into_result().ok()?;
+        let buf_line = row.saturating_sub(1);
+        REVISION_FILE_MAP.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(line, _, _)| *line == buf_line)
+                .map(|(_, idx, path)| (*idx, path.clone()))
+        })
+    })
+}
+
 fn parse_revision_line(text: &str) -> Option<u32> {
     let rest = text.strip_prefix(REVISION_PREFIX)?;
     let rest = rest.strip_prefix("revision ")?;
     let num_end = rest.find(|c: char| !c.is_ascii_digit())?;
     rest[..num_end].parse().ok()
+}
+
+/// Stores the prompt text so it can be inspected by pressing Enter on the
+/// status line.
+pub fn set_last_prompt(prompt: String) {
+    LAST_PROMPT.with(|c| *c.borrow_mut() = Some(prompt));
+}
+
+/// Returns true if the cursor is on a status line (⏳ prefix).
+fn cursor_on_status_line() -> bool {
+    WINDOW
+        .with(|w| {
+            let guard = w.borrow();
+            let win = guard.as_ref()?;
+            let (row, _) = win.get_cursor().into_result().ok()?;
+            BUFFER.with(|b| {
+                let guard = b.borrow();
+                let buf = guard.as_ref()?;
+                let line_idx = row.saturating_sub(1);
+                let text = buf
+                    .get_lines(line_idx..line_idx + 1, false)
+                    .ok()?
+                    .next()?
+                    .to_string_lossy()
+                    .to_string();
+                Some(text.starts_with(STATUS_PREFIX))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Opens a read-only scratch buffer showing the last prompt sent to the agent.
+fn show_last_prompt() {
+    let prompt = LAST_PROMPT.with(|c| c.borrow().clone());
+    let Some(prompt) = prompt else {
+        return;
+    };
+    let line_count = prompt.lines().count();
+    let Ok(mut buf) = api::create_buf(false, true) else {
+        return;
+    };
+    let lines: Vec<&str> = prompt.lines().collect();
+    let _ = buf.set_lines(0..0, false, lines);
+    let buf_opts = OptionOpts::builder().buffer(buf.clone()).build();
+    let _ = api::set_option_value("modifiable", false, &buf_opts);
+    let _ = api::set_option_value("bufhidden", "wipe", &buf_opts);
+    let _ = api::set_option_value("filetype", "markdown", &buf_opts);
+
+    let cols =
+        api::get_option_value::<i64>("columns", &OptionOpts::builder().build()).unwrap_or(80);
+    let rows = api::get_option_value::<i64>("lines", &OptionOpts::builder().build()).unwrap_or(24);
+    let width = (cols as u32).saturating_sub(8).min(120);
+    let height = (rows as u32).saturating_sub(6).min(line_count as u32 + 2);
+    let row = ((rows as f64) - (height as f64)) / 2.0;
+    let col = ((cols as f64) - (width as f64)) / 2.0;
+
+    let win_config = nvim_oxi::api::types::WindowConfig::builder()
+        .relative(nvim_oxi::api::types::WindowRelativeTo::Editor)
+        .width(width)
+        .height(height)
+        .row(row)
+        .col(col)
+        .border(nvim_oxi::api::types::WindowBorder::Rounded)
+        .title(nvim_oxi::api::types::WindowTitle::SimpleString(
+            " Prompt sent to agent ".to_string().into(),
+        ))
+        .build();
+    if let Ok(win) = api::open_win(&buf, true, &win_config) {
+        let win_opts = OptionOpts::builder().win(win).build();
+        let _ = api::set_option_value("wrap", true, &win_opts);
+        let _ = api::set_option_value("cursorline", false, &win_opts);
+        let close_opts = SetKeymapOpts::builder()
+            .callback(move |_| {
+                let _ = api::command("close");
+            })
+            .noremap(true)
+            .silent(true)
+            .build();
+        let _ = buf.set_keymap(Mode::Normal, "q", "", &close_opts);
+    }
+}
+
+/// A highlight span within a single line (byte offsets into the line string).
+struct InlineSpan {
+    start: usize,
+    end: usize,
+    hl: &'static str,
+}
+
+/// A rendered line with optional full-line and inline highlight info.
+struct FormattedLine {
+    text: String,
+    line_hl: Option<&'static str>,
+    spans: Vec<InlineSpan>,
+}
+
+/// Parses agent message text with lightweight markdown rendering.
+///
+/// Recognizes headings, fenced code blocks, bullet/numbered lists,
+/// bold, and inline code. Returns formatted lines ready for buffer
+/// insertion (already prefixed with the 2-space indent).
+fn format_agent_lines(text: &str) -> Vec<FormattedLine> {
+    let raw_lines: Vec<&str> = text.lines().collect();
+    let mut out: Vec<FormattedLine> = Vec::new();
+    let mut in_code_block = false;
+    let mut i = 0;
+
+    while i < raw_lines.len() {
+        let line = raw_lines[i];
+
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            out.push(FormattedLine {
+                text: "  ┄".to_string(),
+                line_hl: Some("ArbiterCodeBlock"),
+                spans: Vec::new(),
+            });
+            i += 1;
+            continue;
+        }
+
+        if in_code_block {
+            out.push(FormattedLine {
+                text: format!("  │ {line}"),
+                line_hl: Some("ArbiterCodeBlock"),
+                spans: Vec::new(),
+            });
+            i += 1;
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("# ") || trimmed.starts_with("## ") || trimmed.starts_with("### ") {
+            let content = trimmed.trim_start_matches('#').trim_start();
+            out.push(FormattedLine {
+                text: format!("  {content}"),
+                line_hl: Some("ArbiterHeading"),
+                spans: Vec::new(),
+            });
+            i += 1;
+            continue;
+        }
+
+        let display = format!("  {line}");
+        let spans = parse_inline_spans(&display);
+        out.push(FormattedLine {
+            text: display,
+            line_hl: None,
+            spans,
+        });
+        i += 1;
+    }
+
+    out
+}
+
+/// Finds bold (`**...**`) and inline code (`` `...` ``) spans in a line.
+/// Returns byte-offset spans into the display string.
+fn parse_inline_spans(line: &str) -> Vec<InlineSpan> {
+    let mut spans = Vec::new();
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            let content_start = i + 2;
+            if let Some(end) = find_closing(bytes, content_start, b'*', b'*') {
+                spans.push(InlineSpan {
+                    start: i,
+                    end: end + 2,
+                    hl: "ArbiterBold",
+                });
+                i = end + 2;
+                continue;
+            }
+        }
+        if bytes[i] == b'`' && (i + 1 >= len || bytes[i + 1] != b'`') {
+            let content_start = i + 1;
+            if let Some(end) = find_single_closing(bytes, content_start, b'`') {
+                spans.push(InlineSpan {
+                    start: i,
+                    end: end + 1,
+                    hl: "ArbiterInlineCode",
+                });
+                i = end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    spans
+}
+
+fn find_closing(bytes: &[u8], start: usize, c1: u8, c2: u8) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < bytes.len() {
+        if bytes[i] == c1 && bytes[i + 1] == c2 && i > start {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_single_closing(bytes: &[u8], start: usize, c: u8) -> Option<usize> {
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == c && i > start {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Applies inline span highlights (bold, inline code) to buffer lines
+/// starting at `base_line` in buffer `buf`.
+fn apply_inline_highlights(buf: &mut Buffer, ns: u32, base_line: usize, lines: &[FormattedLine]) {
+    for (offset, fl) in lines.iter().enumerate() {
+        let buf_line = base_line + offset;
+        if let Some(hl) = fl.line_hl {
+            let _ = buf.add_highlight(ns, hl, buf_line, 0..);
+        }
+        for span in &fl.spans {
+            let _ = buf.add_highlight(ns, span.hl, buf_line, span.start..span.end);
+        }
+    }
 }

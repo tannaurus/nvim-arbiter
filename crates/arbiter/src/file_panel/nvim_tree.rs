@@ -80,10 +80,6 @@ fn build_sign_map(
                     resolve_icon(&icons.approved, nerd, "\u{f00c}", "✔"),
                     "ArbiterSignApproved",
                 ),
-                ReviewStatus::NeedsChanges => (
-                    resolve_icon(&icons.needs_changes, nerd, "\u{f00d}", "✘"),
-                    "ArbiterSignChanges",
-                ),
                 ReviewStatus::Unreviewed => (
                     resolve_icon(&icons.unreviewed, nerd, "\u{f10c}", "○"),
                     "ArbiterSignPending",
@@ -222,13 +218,11 @@ mod tests {
     fn sign_map_status_mapping() {
         let files = vec![
             file("a.rs", FileStatus::Modified, ReviewStatus::Approved),
-            file("b.rs", FileStatus::Modified, ReviewStatus::NeedsChanges),
-            file("c.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
+            file("b.rs", FileStatus::Modified, ReviewStatus::Unreviewed),
         ];
         let map = build_sign_map(&files, false);
         assert_eq!(map["a.rs"], ("✔".to_string(), "ArbiterSignApproved"));
-        assert_eq!(map["b.rs"], ("✘".to_string(), "ArbiterSignChanges"));
-        assert_eq!(map["c.rs"], ("○".to_string(), "ArbiterSignPending"));
+        assert_eq!(map["b.rs"], ("○".to_string(), "ArbiterSignPending"));
     }
 
     #[test]

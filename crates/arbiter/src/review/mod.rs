@@ -33,7 +33,7 @@ use crate::threads;
 use crate::types::Role;
 use crate::types::ThreadOrigin;
 use crate::types::ThreadStatus;
-use crate::types::{FileStatus, ReviewStatus, ThreadSummary};
+use crate::types::{FileStatus, ReviewStatus};
 use nvim_oxi::api::opts::OptionOpts;
 use nvim_oxi::api::opts::SetKeymapOpts;
 use nvim_oxi::api::types::Mode;
@@ -135,8 +135,6 @@ pub(crate) struct Review {
     pub current_hunks: Vec<Hunk>,
     /// Path -> content hash for approved files. Used for ga persistence.
     pub file_content_hash: HashMap<String, String>,
-    /// Whether to show resolved threads.
-    pub show_resolved: bool,
     /// Whether side-by-side view is active.
     pub side_by_side: bool,
     /// Side-by-side buffers and window, if active.
@@ -539,7 +537,6 @@ pub(crate) fn open(ref_name: Option<&str>) -> nvim_oxi::Result<()> {
                             .filter(|(_, f)| !f.content_hash.is_empty())
                             .map(|(p, f)| (p.clone(), f.content_hash.clone()))
                             .collect(),
-                        show_resolved: false,
                         side_by_side: false,
                         sbs: None,
                         config: config.clone(),
@@ -807,19 +804,6 @@ fn handle_ga(review: &mut Review) {
     }
 }
 
-fn handle_gx(review: &mut Review) {
-    let Some(path) = review.current_file.clone() else {
-        return;
-    };
-    if let Some((_, _, rs)) = review.files.iter_mut().find(|(p, _, _)| *p == path) {
-        *rs = ReviewStatus::NeedsChanges;
-    }
-    review.accepted_hunks.remove(&path);
-    save_file_statuses(review);
-    rerender_file_panel(review);
-    select_file_impl(review, &path);
-}
-
 fn handle_gr(review: &mut Review) {
     let Some(path) = review.current_file.clone() else {
         return;
@@ -855,11 +839,6 @@ pub(crate) fn show_summary(review: &mut Review) {
         .iter()
         .filter(|(_, _, rs)| *rs == ReviewStatus::Approved)
         .count();
-    let needs = review
-        .files
-        .iter()
-        .filter(|(_, _, rs)| *rs == ReviewStatus::NeedsChanges)
-        .count();
     let unreviewed = review
         .files
         .iter()
@@ -876,10 +855,9 @@ pub(crate) fn show_summary(review: &mut Review) {
         .filter(|t| t.status == ThreadStatus::Resolved)
         .count();
     let text = format!(
-        "Files: {} total | ✓ {} approved | ✗ {} needs changes | · {} unreviewed\nThreads: {} open | {} resolved",
+        "Files: {} total | ✓ {} approved | · {} unreviewed\nThreads: {} open | {} resolved",
         review.files.len(),
         approved,
-        needs,
         unreviewed,
         open_threads,
         resolved
@@ -1069,10 +1047,7 @@ fn refresh_file_with_diff(
         .cloned()
         .collect();
     let summaries = threads::to_summaries(&file_threads);
-    let visible_count = summaries
-        .iter()
-        .filter(|s| review.show_resolved || s.status != ThreadStatus::Resolved)
-        .count();
+    let visible_count = summaries.len();
     let offset = 1 + visible_count;
     let new_hunk_buf_starts: std::collections::HashSet<usize> =
         changed_raw.iter().map(|&raw| raw + offset).collect();
@@ -1089,7 +1064,6 @@ fn refresh_file_with_diff(
         diff_text,
         &summaries,
         path,
-        review.show_resolved,
         Some(&new_hunk_buf_starts),
         &file_accepted,
     ) {
@@ -1319,7 +1293,7 @@ fn ensure_diff_panel(review: &mut Review) -> bool {
 /// Use this for user-initiated navigation (next/prev file, thread jumps, file
 /// panel clicks, etc.). For re-renders of the current file or for
 /// `handle_file_back`, call `select_file_impl` directly.
-fn navigate_to_file(review: &mut Review, path: &str) {
+pub(crate) fn navigate_to_file(review: &mut Review, path: &str) {
     if review.current_file.as_deref() != Some(path) {
         if let Some(prev) = review.current_file.clone() {
             review.file_history.push(prev);
@@ -1362,7 +1336,6 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             &diff_text,
             &summaries,
             path,
-            review.show_resolved,
             None,
             &file_accepted,
         ) {
@@ -1406,7 +1379,6 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
     let ref_name = review.ref_name.clone();
     let path = path.to_string();
     let path_clone = path.clone();
-    let show_resolved = review.show_resolved;
     let mut diff_buf = review.diff_panel.buf.clone();
     let file_accepted: HashSet<String> = review
         .accepted_hunks
@@ -1434,7 +1406,6 @@ pub(crate) fn select_file_impl(review: &mut Review, path: &str) {
             &diff_text,
             &summaries,
             &path_clone,
-            show_resolved,
             None,
             &file_accepted,
         ) {
@@ -1563,7 +1534,6 @@ fn place_inline_thread_indicators(review: &mut Review) {
         .threads
         .iter()
         .filter(|t| t.file == *current_file)
-        .filter(|t| review.show_resolved || t.status != ThreadStatus::Resolved)
         .collect();
 
     if file_threads.is_empty() {

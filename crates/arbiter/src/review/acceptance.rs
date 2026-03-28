@@ -307,12 +307,11 @@ fn reapply_diff_visuals(review: &mut Review) {
         })
         .unwrap_or_default();
     let summaries = threads::to_summaries(&file_threads);
-    let summary_refs: Vec<&ThreadSummary> = summaries.iter().collect();
 
     let _ = diff::apply_highlights(
         &mut review.diff_panel.buf,
         &review.current_hunks,
-        &summary_refs,
+        &summaries,
         &all_lines,
         None,
         &accepted_buf_starts,

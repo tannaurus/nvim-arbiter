@@ -108,9 +108,11 @@ fn is_busy() -> bool {
     queue::is_busy()
 }
 
-/// Cancels all pending items and causes in-flight callbacks to no-op.
+/// Cancels all pending items, kills in-flight child processes, and
+/// causes in-flight callbacks to no-op.
 pub(crate) fn cancel_all() {
-    queue::cancel_all()
+    queue::cancel_all();
+    kill_tracked_children();
 }
 
 /// Cancels only queued/in-flight items tagged with `tag`.
@@ -291,24 +293,6 @@ pub(crate) fn thread_reply(
     );
 }
 
-/// Catch up (continue review session with summarization prompt).
-pub(crate) fn catch_up(session_id: Option<&str>, prompt: &str, callback: OnComplete) {
-    let op = session_id
-        .map(|s| BackendOp::Resume(s.to_string()))
-        .unwrap_or(BackendOp::ContinueLatest);
-    send(
-        BackendOpts {
-            op,
-            prompt: prompt.to_string(),
-            ask_mode: false,
-            stream: false,
-            json_schema: None,
-        },
-        None,
-        callback,
-    );
-}
-
 /// Self-review (new session, no stream, optional json_schema for Claude).
 pub(crate) fn self_review(prompt: &str, json_schema: Option<String>, callback: OnComplete) {
     send(
@@ -318,21 +302,6 @@ pub(crate) fn self_review(prompt: &str, json_schema: Option<String>, callback: O
             ask_mode: false,
             stream: false,
             json_schema,
-        },
-        None,
-        callback,
-    );
-}
-
-/// Re-anchor (resume session in ask mode).
-pub(crate) fn re_anchor(session_id: &str, prompt: &str, callback: OnComplete) {
-    send(
-        BackendOpts {
-            op: BackendOp::Resume(session_id.to_string()),
-            prompt: prompt.to_string(),
-            ask_mode: true,
-            stream: false,
-            json_schema: None,
         },
         None,
         callback,

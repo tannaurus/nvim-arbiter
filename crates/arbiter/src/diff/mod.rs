@@ -9,6 +9,6 @@ pub(crate) use arbiter_core::diff::{
     synthesize_untracked, Hunk,
 };
 pub(crate) use render::{
-    apply_highlights, close_side_by_side, open_side_by_side, render, set_hunk_folds, win_exec,
-    RenderResult,
+    apply_highlights, close_side_by_side, open_side_by_side, render, set_hunk_folds, toggle_style,
+    win_exec, RenderResult,
 };

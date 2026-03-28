@@ -175,31 +175,6 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
     )?;
 
     api::create_user_command(
-        "ArbiterCatchUp",
-        |_args: CommandArgs| {
-            let cfg = config::get();
-            let prompt = cfg.prompts.catch_up.clone();
-            let _ = response_panel::open_or_reuse("Agent Catch Up");
-            let _ = response_panel::append("Waiting for agent...\n");
-            let session_id = get_resumed_session();
-            backend::catch_up(
-                session_id.as_deref(),
-                &prompt,
-                Box::new(|res| {
-                    if let Some(e) = res.error.as_ref() {
-                        let _ = response_panel::append(&format!("\nError: {e}"));
-                    } else {
-                        let _ = response_panel::append(&res.text);
-                    }
-                }),
-            );
-        },
-        &CreateCommandOpts::builder()
-            .nargs(CommandNArgs::Zero)
-            .build(),
-    )?;
-
-    api::create_user_command(
         "ArbiterList",
         |_args: CommandArgs| {
             let cwd = std::env::current_dir()
@@ -512,19 +487,6 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
     )?;
 
     api::create_user_command(
-        "ArbiterRefresh",
-        |_args: CommandArgs| {
-            with_review_cmd(|r| {
-                review::refresh_file(r);
-                review::refresh_file_list(r);
-            });
-        },
-        &CreateCommandOpts::builder()
-            .nargs(CommandNArgs::Zero)
-            .build(),
-    )?;
-
-    api::create_user_command(
         "ArbiterRef",
         |args: CommandArgs| {
             let new_ref = args
@@ -588,6 +550,38 @@ pub(crate) fn register_commands() -> nvim_oxi::Result<()> {
         },
         &CreateCommandOpts::builder()
             .nargs(CommandNArgs::Any)
+            .build(),
+    )?;
+
+    api::create_user_command(
+        "ArbiterFile",
+        |args: CommandArgs| {
+            let path = args.fargs.first().cloned().unwrap_or_default();
+            if path.is_empty() {
+                api::err_writeln("[arbiter] usage: ArbiterFile <path> [line]");
+                return;
+            }
+            let line: Option<usize> = args.fargs.get(1).and_then(|s| s.parse().ok());
+            with_review_cmd(|r| {
+                if !r.files.iter().any(|(p, _, _)| *p == path) {
+                    api::err_writeln(&format!("[arbiter] {path} is not in the review"));
+                    return;
+                }
+                review::navigate_to_file(r, &path);
+                let _ = api::set_current_win(&r.diff_panel.win);
+                if let Some(src_line) = line {
+                    let line_refs: Vec<&str> =
+                        r.current_diff_lines.iter().map(|s| s.as_str()).collect();
+                    if let Some(buf_line) =
+                        crate::diff::source_to_buf_line(&r.current_hunks, src_line, &line_refs)
+                    {
+                        let _ = r.diff_panel.win.set_cursor(buf_line.saturating_add(1), 0);
+                    }
+                }
+            });
+        },
+        &CreateCommandOpts::builder()
+            .nargs(CommandNArgs::OneOrMore)
             .build(),
     )?;
 

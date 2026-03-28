@@ -19,10 +19,14 @@ fn make_thread_reply_callback(
             with_active(|r| {
                 if let Some(t) = r.threads.iter_mut().find(|x| x.id == tid) {
                     threads::add_message(t, Role::User, &text);
+                    if t.status == ThreadStatus::Resolved {
+                        t.status = ThreadStatus::Open;
+                    }
                     if threads::window_is_open() {
                         let _ = threads::append_message(Role::User, &text);
                     }
                     let session_id = t.session_id.clone();
+                    let is_resumed = session_id.is_some();
                     let state_dir = r.config.state_dir();
                     let ws_hash = state::workspace_hash(Path::new(&r.cwd)).clone();
                     let ref_name = r.ref_name.clone();
@@ -57,6 +61,8 @@ fn make_thread_reply_callback(
                     let t_context = t.anchor_context.clone();
                     let t_similar = t.similar_threads.clone();
                     let similar_ctx = gather_similar_context(&r.threads, &t_similar);
+                    let nearby_diff =
+                        prompts::extract_nearby_diff(&r.current_diff_text, t_line, 50);
                     let project_rules_text = rules::format_for_prompt(&rules::resolve(
                         &r.project_rules,
                         rules::Scenario::Thread,
@@ -64,7 +70,7 @@ fn make_thread_reply_callback(
                     ));
                     let review_ctx = prompts::ReviewContext {
                         ref_name: &r.ref_name,
-                        file_diff: &r.current_diff_text,
+                        file_diff: &nearby_diff,
                         review_rules: &r.review_rules,
                         project_rules: project_rules_text,
                     };
@@ -76,10 +82,13 @@ fn make_thread_reply_callback(
                             anchor_content: &t_anchor,
                             context: &t_context,
                             prior_messages: &prior_messages,
+                            is_resumed,
                         },
                         &review_ctx,
                         &similar_ctx,
                     );
+                    let prompt_len = prompt.len();
+                    threads::set_last_prompt(prompt.clone());
                     let file_notify = file_for_notify.clone();
                     let reply_tag = tid.clone();
                     let status_tid = tid.clone();
@@ -170,7 +179,7 @@ fn make_thread_reply_callback(
                         }),
                         Some(reply_tag),
                     );
-                    show_thread_queue_status(&status_tid);
+                    show_thread_queue_status(&status_tid, Some(prompt_len));
                     state::save_threads(&sd2, &ws2, &rn2, &r.threads);
                     if let Some(p) = r.current_file.clone() {
                         select_file_impl(r, &p);
@@ -191,8 +200,8 @@ pub(super) fn open_thread_panel(review: &Review, t: &threads::Thread) {
     clear_thread_anchor();
     let on_reply = make_thread_reply_callback(t.id.clone(), t.file.clone(), t.line);
     let on_close: threads::OnClose = Arc::new(clear_thread_anchor);
-    let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx| {
-        with_active(|r| handle_revision_selected(r, rev_idx));
+    let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx, file| {
+        with_active(|r| handle_revision_selected(r, rev_idx, file.as_deref()));
     });
     let on_similar: threads::OnSimilarSelected = Arc::new(|tid| {
         with_active(|r| handle_similar_selected(r, &tid));
@@ -227,7 +236,7 @@ pub(super) fn open_thread_panel(review: &Review, t: &threads::Thread) {
     let is_inflight = backend::inflight_tag().as_deref() == Some(&t.id);
     let is_queued = backend::queue_position(&t.id).is_some();
     if is_inflight || is_queued {
-        show_thread_queue_status(&t.id);
+        show_thread_queue_status(&t.id, None);
     }
 }
 
@@ -401,17 +410,6 @@ pub(super) fn try_resolve_thread_at_cursor(review: &mut Review) -> bool {
     true
 }
 
-fn get_thread_at_cursor(review: &Review) -> Option<&threads::Thread> {
-    let (row, _) = review.diff_panel.win.get_cursor().into_result().ok()?;
-    let buf_line = row.saturating_sub(1);
-    let tid = review
-        .thread_buf_lines
-        .iter()
-        .find(|(_, &l)| l == buf_line)?
-        .0;
-    review.threads.iter().find(|t| t.id == *tid)
-}
-
 fn get_source_loc(review: &Review) -> Option<(String, u32, String, Vec<String>)> {
     let path = match review.current_file.as_ref() {
         Some(p) => p,
@@ -472,7 +470,7 @@ fn get_source_loc(review: &Review) -> Option<(String, u32, String, Vec<String>)>
     Some((path.clone(), line_num as u32, anchor_content, context))
 }
 
-pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) {
+pub(super) fn handle_immediate_comment(review: &mut Review) {
     let Some((path, line, anchor_content, context)) = get_source_loc(review) else {
         return;
     };
@@ -496,7 +494,7 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                     &trimmed,
                     threads::CreateOpts {
                         pending: false,
-                        auto_resolve,
+                        auto_resolve: false,
                         origin: ThreadOrigin::User,
                         anchor_content: anchor_content.clone(),
                         anchor_context: context.clone(),
@@ -516,8 +514,8 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
             let tid = thread.id.clone();
             let on_reply = make_thread_reply_callback(tid.clone(), path.clone(), line);
             let on_close: threads::OnClose = Arc::new(clear_thread_anchor);
-            let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx| {
-                with_active(|r| handle_revision_selected(r, rev_idx));
+            let on_revision: threads::OnRevisionSelected = Arc::new(|rev_idx, file| {
+                with_active(|r| handle_revision_selected(r, rev_idx, file.as_deref()));
             });
             let on_similar: threads::OnSimilarSelected = Arc::new(|tid| {
                 with_active(|r| handle_similar_selected(r, &tid));
@@ -540,6 +538,7 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
             with_active(|r| place_thread_anchor(r, thread.line));
 
             let prompt = with_active(|r| {
+                let nearby_diff = prompts::extract_nearby_diff(&r.current_diff_text, line, 50);
                 let project_rules_text = rules::format_for_prompt(&rules::resolve(
                     &r.project_rules,
                     rules::Scenario::Thread,
@@ -547,7 +546,7 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                 ));
                 let review_ctx = prompts::ReviewContext {
                     ref_name: &r.ref_name,
-                    file_diff: &r.current_diff_text,
+                    file_diff: &nearby_diff,
                     review_rules: &r.review_rules,
                     project_rules: project_rules_text,
                 };
@@ -568,6 +567,8 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                     let _ = threads::append_streaming(chunk);
                 }
             });
+            let prompt_len = prompt.len();
+            threads::set_last_prompt(prompt.clone());
             let file_notify = path.clone();
             let comment_tag = tid.clone();
             let window_tid = tid.clone();
@@ -649,7 +650,7 @@ pub(super) fn handle_immediate_comment(review: &mut Review, auto_resolve: bool) 
                 }),
                 Some(comment_tag),
             );
-            show_thread_queue_status(&status_tid);
+            show_thread_queue_status(&status_tid, Some(prompt_len));
         }),
         Box::new(|| {}),
     ) {
@@ -923,6 +924,7 @@ struct ThreadListContent {
 
 fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
     let inflight = backend::inflight_tag();
+    let focused = threads::window_thread_id();
     let mut lines = Vec::new();
     let mut line_map: Vec<Option<(String, ThreadStatus)>> = Vec::new();
     let mut highlights: Vec<(usize, &'static str)> = Vec::new();
@@ -981,25 +983,34 @@ fn build_thread_list_lines(threads: &[&threads::Thread]) -> ThreadListContent {
                 })
                 .unwrap_or_default();
             let is_inflight = inflight.as_deref() == Some(&t.id);
+            let is_focused = focused.as_deref() == Some(t.id.as_str());
             let queue_pos = if is_inflight {
                 None
             } else {
                 backend::queue_position(&t.id)
             };
+            let is_agent = t.origin == ThreadOrigin::Agent;
             let activity = if is_inflight {
                 " ◐ thinking"
+            } else if is_focused {
+                " ◀ open"
             } else {
                 match queue_pos {
                     Some(0) => " ◌ next",
                     Some(_) => " ◌ queued",
+                    None if is_agent => " ▸ agent",
                     None => "",
                 }
             };
             let line_idx = lines.len();
             if is_inflight {
                 highlights.push((line_idx, "DiagnosticOk"));
+            } else if is_focused {
+                highlights.push((line_idx, "DiagnosticInfo"));
             } else if queue_pos.is_some() {
                 highlights.push((line_idx, "DiagnosticHint"));
+            } else if is_agent {
+                highlights.push((line_idx, "NonText"));
             }
             lines.push(format!("    {}:{}  {}{activity}", t.file, t.line, preview));
             line_map.push(Some((t.id.clone(), t.status)));
@@ -1020,6 +1031,7 @@ fn update_thread_list_buf(buf: &mut nvim_oxi::api::Buffer, content: &ThreadListC
     let refs: Vec<&str> = content.lines.iter().map(|s| s.as_str()).collect();
     let _ = buf.set_lines(0..lc, false, refs);
     let _ = api::set_option_value("modifiable", false, &bo);
+    crate::panel::disable_syntax(buf);
     apply_thread_list_highlights(buf, &content.highlights);
 }
 
@@ -1027,7 +1039,13 @@ fn apply_thread_list_highlights(buf: &mut nvim_oxi::api::Buffer, highlights: &[(
     let ns = api::create_namespace("arbiter-thread-list");
     let _ = buf.clear_namespace(ns, 0..usize::MAX);
     for &(line, hl_group) in highlights {
-        let _ = buf.add_highlight(ns, hl_group, line, 0..);
+        let opts = nvim_oxi::api::opts::SetExtmarkOpts::builder()
+            .end_col(0)
+            .end_row(line + 1)
+            .hl_group(hl_group)
+            .hl_mode(nvim_oxi::api::types::ExtmarkHlMode::Replace)
+            .build();
+        let _ = buf.set_extmark(ns, line, 0, &opts);
     }
 }
 
@@ -1067,94 +1085,28 @@ pub(super) fn refresh_thread_list() {
     });
 }
 
-fn show_thread_queue_status(tid: &str) {
+fn show_thread_queue_status(tid: &str, prompt_size: Option<usize>) {
     if threads::window_thread_id().as_deref() != Some(tid) {
         return;
     }
+    let size_label = prompt_size.map(format_token_estimate).unwrap_or_default();
     let (msg, hl) = match backend::queue_position(tid) {
-        Some(pos) => (format!("queued ({} ahead)", pos + 1), "DiagnosticHint"),
-        None => ("agent thinking...".to_string(), "DiagnosticOk"),
+        Some(pos) => (
+            format!("queued ({} ahead){size_label}", pos + 1),
+            "DiagnosticHint",
+        ),
+        None => (format!("agent thinking...{size_label}"), "DiagnosticOk"),
     };
     let _ = threads::append_status_hl(&msg, Some(hl));
 }
 
-pub(super) fn handle_resolve_thread(review: &mut Review) {
-    let Some(t) = get_thread_at_cursor(review) else {
-        return;
-    };
-    let tid = t.id.clone();
-    if let Some(t) = review.threads.iter_mut().find(|x| x.id == tid) {
-        threads::resolve(t);
-        if threads::window_thread_id().as_deref() == Some(tid.as_str()) {
-            threads::window_close();
-        }
-        let state_dir = review.config.state_dir();
-        let ws_hash = state::workspace_hash(Path::new(&review.cwd));
-        state::save_threads(&state_dir, &ws_hash, &review.ref_name, &review.threads);
-        if let Some(p) = review.current_file.clone() {
-            select_file_impl(review, &p);
-        }
+fn format_token_estimate(chars: usize) -> String {
+    let tokens = chars / 4;
+    if tokens >= 1000 {
+        format!("  ~{:.1}k tokens", tokens as f64 / 1000.0)
+    } else {
+        format!("  ~{tokens} tokens")
     }
-}
-
-pub(super) fn handle_g_q(review: &mut Review) {
-    review.show_resolved = !review.show_resolved;
-    if let Some(path) = review.current_file.clone() {
-        select_file_impl(review, &path);
-    }
-}
-
-pub(super) fn handle_reanchor(review: &mut Review) {
-    let Some(t) = get_thread_at_cursor(review) else {
-        return;
-    };
-    let sid = match t.session_id.as_deref() {
-        Some(s) => s.to_string(),
-        None => return,
-    };
-    let Some((path, line, anchor_content, context)) = get_source_loc(review) else {
-        return;
-    };
-    let project_rules_text = rules::format_for_prompt(&rules::resolve(
-        &review.project_rules,
-        rules::Scenario::Thread,
-        Some(&path),
-    ));
-    let review_ctx = prompts::ReviewContext {
-        ref_name: &review.ref_name,
-        file_diff: &review.current_diff_text,
-        review_rules: &review.review_rules,
-        project_rules: project_rules_text,
-    };
-    let prompt =
-        prompts::format_comment_prompt(&path, line, "", &anchor_content, &context, &review_ctx);
-    let sid2 = sid.clone();
-    backend::re_anchor(
-        &sid,
-        &prompt,
-        Box::new(move |res| {
-            let had_error = res.error.is_some();
-            with_active(|r| {
-                if let Some(t) = r
-                    .threads
-                    .iter_mut()
-                    .find(|x| x.session_id.as_deref() == Some(sid2.as_str()))
-                {
-                    threads::add_message(t, Role::Agent, &res.text);
-                    let tid = t.id.clone();
-                    let state_dir = r.config.state_dir();
-                    let ws_hash = state::workspace_hash(Path::new(&r.cwd));
-                    state::save_threads(&state_dir, &ws_hash, &r.ref_name, &r.threads);
-                    if let Some(p) = r.current_file.clone() {
-                        select_file_impl(r, &p);
-                    }
-                    if !had_error {
-                        maybe_queue_extraction(r, &tid);
-                    }
-                }
-            });
-        }),
-    );
 }
 
 pub(super) fn nav_next_thread(review: &mut Review) {

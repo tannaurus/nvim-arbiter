@@ -28,7 +28,7 @@ pub(crate) mod types;
 use nvim_oxi::api::opts::CreateAutocmdOpts;
 use nvim_oxi::api::types::LogLevel;
 use nvim_oxi::api::{self};
-use nvim_oxi::{Dictionary, Object};
+use nvim_oxi::{Array, Dictionary, Object};
 use serde::de::IntoDeserializer;
 use serde::Deserialize;
 
@@ -79,6 +79,30 @@ pub fn setup(opts: Dictionary) -> nvim_oxi::Result<()> {
     Ok(())
 }
 
+/// Returns the file list and workspace root for the active review.
+///
+/// Returns nil when no review is active. Otherwise returns a table:
+///   `{ cwd = "/abs/path", files = { { path = "src/foo.rs", status = "approved" }, ... } }`
+pub fn review_files() -> Object {
+    review::with_active(|r| {
+        let files: Array = r
+            .files
+            .iter()
+            .map(|(path, _, rs)| {
+                Object::from(Dictionary::from_iter([
+                    ("path", Object::from(path.clone())),
+                    ("status", Object::from(rs.to_string())),
+                ]))
+            })
+            .collect();
+        Object::from(Dictionary::from_iter([
+            ("cwd", Object::from(r.cwd.clone())),
+            ("files", Object::from(files)),
+        ]))
+    })
+    .unwrap_or_else(Object::nil)
+}
+
 /// Statusline component. Returns empty string when no review is active.
 ///
 /// With an active review, returns review progress counts
@@ -113,6 +137,12 @@ fn arbiter() -> nvim_oxi::Result<Dictionary> {
         (
             "statusline",
             Object::from(nvim_oxi::Function::<(), String>::from_fn(|_| statusline())),
+        ),
+        (
+            "review_files",
+            Object::from(nvim_oxi::Function::<(), Object>::from_fn(|_| {
+                review_files()
+            })),
         ),
     ]))
 }
